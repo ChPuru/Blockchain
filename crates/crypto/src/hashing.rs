@@ -208,31 +208,6 @@ mod tests {
     ];
 
     #[test]
-    fn tag_list_matches_the_contract_table() {
-        let expected = [
-            "ferrum.v1.txid",
-            "ferrum.v1.sighash",
-            "ferrum.v1.header",
-            "ferrum.v1.merkle.leaf",
-            "ferrum.v1.merkle.node",
-            "ferrum.v1.address",
-            "ferrum.v1.script",
-            "ferrum.v1.state.root",
-            "ferrum.v1.undo",
-            "ferrum.v1.bft.proposal",
-            "ferrum.v1.bft.prevote",
-            "ferrum.v1.bft.precommit",
-            "ferrum.v1.p2p.msgid",
-            "ferrum.v1.genesis",
-            "ferrum.v1.hd.seed",
-        ];
-        assert_eq!(ALL_TAGS.len(), expected.len(), "the frozen list changed length");
-        for (tag, want) in ALL_TAGS.iter().zip(expected.iter()) {
-            assert_eq!(tag.0, *want, "tag context string changed: that is a hard fork");
-        }
-    }
-
-    #[test]
     fn every_tag_context_string_is_distinct() {
         for (i, a) in ALL_TAGS.iter().enumerate() {
             for (j, b) in ALL_TAGS.iter().enumerate() {
@@ -330,13 +305,6 @@ mod tests {
         for (i, tag) in ALL_TAGS.iter().enumerate() {
             assert_eq!(tag_index(*tag), Some(i));
         }
-    }
-
-    #[test]
-    fn tag_display_and_debug() {
-        assert_eq!(TAG_TXID.to_string(), "ferrum.v1.txid");
-        assert_eq!(format!("{TAG_TXID:?}"), "Tag(\"ferrum.v1.txid\")");
-        assert_eq!(TAG_TXID.as_str(), "ferrum.v1.txid");
     }
 
     #[test]

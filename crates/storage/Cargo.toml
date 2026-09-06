@@ -17,6 +17,7 @@ ferrum-crypto = { workspace = true }
 redb = { workspace = true }
 borsh = { workspace = true }
 hex = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
 tracing = { workspace = true }
@@ -24,4 +25,4 @@ tracing = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
-
+serde_json = { workspace = true }
