@@ -61,8 +61,8 @@ asert: ## Diff the Rust ASERT against the independent Python implementation
 
 .PHONY: fuzz
 fuzz: ## 60s each on the decoder and the script VM (needs nightly + cargo-fuzz)
-	cd testing/fuzz && cargo fuzz run decode -- -max_total_time=60
-	cd testing/fuzz && cargo fuzz run script -- -max_total_time=60
+	cargo +nightly fuzz run --fuzz-dir testing/fuzz decode -- -max_total_time=60
+	cargo +nightly fuzz run --fuzz-dir testing/fuzz script -- -max_total_time=60
 
 .PHONY: audit
 audit: ## Check dependencies against the RustSec advisory database

@@ -109,8 +109,8 @@ jobs:
       # The decoder is where unauthenticated bytes from anonymous peers land, and
       # the script VM is the largest attack surface. 60s each on every push is
       # cheap; deep runs happen before a release, not nightly.
-      - run: cd testing/fuzz && cargo fuzz run decode -- -max_total_time=60
-      - run: cd testing/fuzz && cargo fuzz run script -- -max_total_time=60
+      - run: cargo fuzz run --fuzz-dir testing/fuzz decode -- -max_total_time=60
+      - run: cargo fuzz run --fuzz-dir testing/fuzz script -- -max_total_time=60
 
   e2e:
     name: multi-node devnet e2e

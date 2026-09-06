@@ -1,0 +1,48 @@
+# A standalone cargo-fuzz project, deliberately outside the main workspace: it
+# needs nightly and a sanitizer runtime, and it must never be pulled into a
+# normal `cargo build`.
+#
+# Run from the repository root:
+#   cargo +nightly fuzz run --fuzz-dir testing/fuzz decode
+#   cargo +nightly fuzz run --fuzz-dir testing/fuzz script
+[package]
+name         = "ferrum-fuzz"
+version      = "0.0.0"
+edition      = "2024"
+publish      = false
+rust-version = "1.95"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary     = { version = "1", features = ["derive"] }
+borsh         = { version = "1.5", features = ["derive"] }
+ferrum-types  = { path = "../../crates/types" }
+ferrum-crypto = { path = "../../crates/crypto" }
+ferrum-script = { path = "../../crates/script" }
+
+[[bin]]
+name  = "decode"
+path  = "fuzz_targets/decode.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "script"
+path  = "fuzz_targets/script.rs"
+test  = false
+doc   = false
+bench = false
+
+# Optimised, but with debug assertions on: a fuzzer that cannot see an overflow
+# or a failed invariant is only testing that the process does not segfault.
+[profile.release]
+debug            = 1
+debug-assertions = true
+overflow-checks  = true
+
+# Standalone workspace — the root manifest excludes this directory.
+[workspace]
