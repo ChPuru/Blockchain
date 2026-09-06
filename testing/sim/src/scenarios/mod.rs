@@ -86,11 +86,7 @@ impl Verdict {
 /// [`SimError::ExecutorDisagreement`] when production and the reference
 /// disagree about the block. That is a finding, not a harness failure, and it
 /// is reported as loudly as any consensus bug.
-pub fn judge(
-    pre: &dyn StateView,
-    block: &Block,
-    ctx: &BlockCtx,
-) -> Result<Verdict, SimError> {
+pub fn judge(pre: &dyn StateView, block: &Block, ctx: &BlockCtx) -> Result<Verdict, SimError> {
     let production = apply_block(pre, block, ctx);
     let reference = apply_block_reference(pre, block, ctx);
     match (production, reference) {
@@ -141,16 +137,10 @@ mod tests {
         let ctx = chain.next_ctx().unwrap();
         let pre = chain.state_view();
         let block = chain
-            .build_block(&BlockPlan {
-                merkle_root: Some(Hash32::ZERO),
-                ..BlockPlan::default()
-            })
+            .build_block(&BlockPlan { merkle_root: Some(Hash32::ZERO), ..BlockPlan::default() })
             .unwrap();
         let verdict = judge(&pre, &block, &ctx).unwrap();
-        assert!(matches!(
-            verdict.rejection(),
-            Some(ValidationError::MerkleRootMismatch { .. })
-        ));
+        assert!(matches!(verdict.rejection(), Some(ValidationError::MerkleRootMismatch { .. })));
     }
 
     #[test]

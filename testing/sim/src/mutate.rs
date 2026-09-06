@@ -125,17 +125,13 @@ pub fn invalid_variants(
     });
     out.push(Mutation {
         name: "the first transaction is not a coinbase",
-        block: chain.build_block(&BlockPlan {
-            coinbase: Some(filler_tx(1)),
-            ..BlockPlan::default()
-        })?,
+        block: chain
+            .build_block(&BlockPlan { coinbase: Some(filler_tx(1)), ..BlockPlan::default() })?,
     });
     out.push(Mutation {
         name: "a second coinbase claims a second subsidy",
-        block: chain.build_block(&BlockPlan {
-            txs: vec![fake_coinbase()],
-            ..BlockPlan::default()
-        })?,
+        block: chain
+            .build_block(&BlockPlan { txs: vec![fake_coinbase()], ..BlockPlan::default() })?,
     });
     let repeated = filler_tx(2);
     out.push(Mutation {
@@ -240,10 +236,8 @@ pub fn invalid_variants(
     });
     out.push(Mutation {
         name: "the header names a parent it does not have",
-        block: chain.build_block(&BlockPlan {
-            prev_hash: Some(BlockHash::ZERO),
-            ..BlockPlan::default()
-        })?,
+        block: chain
+            .build_block(&BlockPlan { prev_hash: Some(BlockHash::ZERO), ..BlockPlan::default() })?,
     });
     out.push(Mutation {
         name: "the timestamp is not strictly after median time past",
@@ -274,10 +268,7 @@ pub fn invalid_variants(
     let orphan_spend = chain_spend(chain, vec![phantom_coin(0x44)], Amount::from_grains(1))?;
     out.push(Mutation {
         name: "a transaction spends an output that does not exist",
-        block: chain.build_block(&BlockPlan {
-            txs: vec![orphan_spend],
-            ..BlockPlan::default()
-        })?,
+        block: chain.build_block(&BlockPlan { txs: vec![orphan_spend], ..BlockPlan::default() })?,
     });
 
     let mature = chain.mature(height);
@@ -286,16 +277,17 @@ pub fn invalid_variants(
         let first = chain_spend(chain, vec![coin.clone()], Amount::from_grains(1_000))?;
         let second = TxPlan {
             inputs: vec![coin.clone()],
-            outputs: vec![(Lock::P2pkh { key: 5 }, coin.coin.value.saturating_sub(Amount::from_grains(2_000)))],
+            outputs: vec![(
+                Lock::P2pkh { key: 5 },
+                coin.coin.value.saturating_sub(Amount::from_grains(2_000)),
+            )],
             ..TxPlan::default()
         };
         let second = chain.build_tx(&second)?;
         out.push(Mutation {
             name: "two transactions in one block spend the same coin",
-            block: chain.build_block(&BlockPlan {
-                txs: vec![first, second],
-                ..BlockPlan::default()
-            })?,
+            block: chain
+                .build_block(&BlockPlan { txs: vec![first, second], ..BlockPlan::default() })?,
         });
 
         // Outputs exceeding inputs by one grain.
@@ -310,16 +302,16 @@ pub fn invalid_variants(
         let inflate = chain.build_tx(&inflate)?;
         out.push(Mutation {
             name: "a transaction pays out one grain more than it spends",
-            block: chain.build_block(&BlockPlan {
-                txs: vec![inflate],
-                ..BlockPlan::default()
-            })?,
+            block: chain.build_block(&BlockPlan { txs: vec![inflate], ..BlockPlan::default() })?,
         });
 
         // A locktime in the future makes the transaction non-final.
         let late = TxPlan {
             inputs: vec![coin.clone()],
-            outputs: vec![(Lock::P2pkh { key: 7 }, coin.coin.value.saturating_sub(Amount::from_grains(1_000)))],
+            outputs: vec![(
+                Lock::P2pkh { key: 7 },
+                coin.coin.value.saturating_sub(Amount::from_grains(1_000)),
+            )],
             lock_time: u32::try_from(height.saturating_add(50)).unwrap_or(u32::MAX),
             ..TxPlan::default()
         };
@@ -341,10 +333,7 @@ pub fn invalid_variants(
         }
         out.push(Mutation {
             name: "a corrupted signature",
-            block: chain.build_block(&BlockPlan {
-                txs: vec![broken],
-                ..BlockPlan::default()
-            })?,
+            block: chain.build_block(&BlockPlan { txs: vec![broken], ..BlockPlan::default() })?,
         });
     }
 
@@ -446,8 +435,8 @@ mod tests {
     #[test]
     fn a_failing_nonce_can_always_be_found() {
         let mut chain = ChainBuilder::devnet(1).unwrap();
-        let mut block = chain.build_block(&BlockPlan { grind: false, ..BlockPlan::default() })
-            .unwrap();
+        let mut block =
+            chain.build_block(&BlockPlan { grind: false, ..BlockPlan::default() }).unwrap();
         grind_until_invalid(&mut block.header).unwrap();
         let target = compact_to_target(block.header.bits).unwrap();
         assert!(!hash_meets_target(&header_hash(&block.header), target));

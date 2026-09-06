@@ -86,11 +86,7 @@ impl BlockCost {
 /// [`SimError::Script`] if an input fails to verify, and [`SimError::Fixture`]
 /// if an input does not resolve in `pre` — this measures a block that is
 /// already known to be valid.
-pub fn measure(
-    block: &Block,
-    pre: &dyn StateView,
-    ctx: &BlockCtx,
-) -> Result<BlockCost, SimError> {
+pub fn measure(block: &Block, pre: &dyn StateView, ctx: &BlockCtx) -> Result<BlockCost, SimError> {
     let mut cost = BlockCost::default();
     for tx in block.txs.iter().skip(1) {
         for (index, input) in tx.inputs.iter().enumerate() {
@@ -162,9 +158,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use ferrum_chain::ValidationError;
-    use ferrum_script::{
-        MAX_PUBKEYS_PER_MULTISIG, MAX_SCRIPT_SIZE, MAX_STACK_SIZE, ScriptError,
-    };
+    use ferrum_script::{MAX_PUBKEYS_PER_MULTISIG, MAX_SCRIPT_SIZE, MAX_STACK_SIZE, ScriptError};
 
     use super::*;
     use crate::chain_builder::{BlockPlan, ChainBuilder, TxPlan};
@@ -228,8 +222,7 @@ mod tests {
         let height = chain.height() + 1;
         let coin = chain.take_mature(1, height).pop().unwrap();
         let over = usize::try_from(MAX_OPS).unwrap() + 1;
-        let verdict =
-            spend_raw(&mut chain, &coin, nop_script(over), Vec::new(), 0).unwrap();
+        let verdict = spend_raw(&mut chain, &coin, nop_script(over), Vec::new(), 0).unwrap();
         match verdict.rejection() {
             Some(ValidationError::ScriptVerification { source, .. }) => {
                 assert!(
@@ -354,11 +347,7 @@ mod tests {
         assert_eq!(inputs.len(), EXPENSIVE_INPUTS);
         let total = inputs.iter().fold(Amount::ZERO, |a, c| a.saturating_add(c.coin.value));
         let tx = chain
-            .build_tx(&TxPlan::sweep(
-                inputs,
-                Lock::P2pkh { key: 0 },
-                Amount::from_grains(10_000),
-            ))
+            .build_tx(&TxPlan::sweep(inputs, Lock::P2pkh { key: 0 }, Amount::from_grains(10_000)))
             .unwrap();
         assert_eq!(tx.outputs[0].value, total.saturating_sub(Amount::from_grains(10_000)));
         // Each `script_sig` carries 15 signatures of 65 bytes plus their push
@@ -416,8 +405,7 @@ mod tests {
         // `MAX_OPS` NOPs plus the trailing OP_1: the OP_1 is a push and is not
         // charged, so this sits exactly on the budget.
         let at_limit = usize::try_from(MAX_OPS).unwrap();
-        let verdict =
-            spend_raw(&mut chain, &coin, nop_script(at_limit), Vec::new(), 0).unwrap();
+        let verdict = spend_raw(&mut chain, &coin, nop_script(at_limit), Vec::new(), 0).unwrap();
         assert!(verdict.is_accepted(), "exactly at the limit must pass: {verdict:?}");
     }
 

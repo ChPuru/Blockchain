@@ -22,7 +22,7 @@
 //! already mid-reorganisation when it finds the defect.
 //!
 //! **Red:** the branch never becomes the tip, the failure names
-//! [`ValidationError::CoinbaseOverpayment`], and the UTXO set is unchanged
+//! [`ferrum_chain::ValidationError::CoinbaseOverpayment`], and the UTXO set is unchanged
 //! byte for byte.
 //! **Green:** a branch of the same shape whose blocks are all *valid* does
 //! replace the honest tip — so the rejection above is the invalid block being
@@ -72,17 +72,15 @@ pub fn honest_node(seed: u64) -> Result<(SimNode, ChainBuilder), SimError> {
 /// # Errors
 ///
 /// [`SimError`] if a block cannot be built.
-pub fn build_branch(
-    chain: &ChainBuilder,
-    invalid_at: Option<u64>,
-) -> Result<Vec<Block>, SimError> {
+pub fn build_branch(chain: &ChainBuilder, invalid_at: Option<u64>) -> Result<Vec<Block>, SimError> {
     let mut fork = chain.fork_at(FORK_HEIGHT)?;
     fork.set_extra_nonce(BRANCH_NONCE);
     let mut blocks = Vec::with_capacity(BRANCH_LENGTH);
     for _ in 0..BRANCH_LENGTH {
         let height = fork.height().saturating_add(1);
         let bonus = u64::from(invalid_at == Some(height));
-        let block = fork.build_block(&BlockPlan { coinbase_bonus: bonus, ..BlockPlan::default() })?;
+        let block =
+            fork.build_block(&BlockPlan { coinbase_bonus: bonus, ..BlockPlan::default() })?;
         fork.connect(&block);
         blocks.push(block);
     }
@@ -105,9 +103,8 @@ pub fn first_winning_height(seed: u64) -> Result<u64, SimError> {
     let (node, chain) = honest_node(seed)?;
     let branch = build_branch(&chain, None)?;
     for (index, block) in branch.iter().enumerate() {
-        let height = FORK_HEIGHT
-            .saturating_add(u64::try_from(index).unwrap_or(0))
-            .saturating_add(1);
+        let height =
+            FORK_HEIGHT.saturating_add(u64::try_from(index).unwrap_or(0)).saturating_add(1);
         if node.accept(block.clone())?.moved_the_tip() {
             return Ok(height);
         }
@@ -246,12 +243,11 @@ mod tests {
         // The rest name parents the node never stored. They are held as
         // orphans under a bounded cap — never validated, never applied.
         for block in branch.iter().skip(cutoff + 2) {
-            match node.accept(block.clone()) {
-                Ok(outcome) => assert!(
+            if let Ok(outcome) = node.accept(block.clone()) {
+                assert!(
                     matches!(outcome, AcceptOutcome::Orphan),
                     "an unconnectable block must be held, not applied: {outcome:?}"
-                ),
-                Err(_) => {}
+                );
             }
         }
         assert_eq!(node.tip().1, HONEST_HEIGHT as u64);

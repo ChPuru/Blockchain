@@ -208,3 +208,125 @@ async fn an_oversized_body_is_refused_by_the_limit_layer() {
     let (status, _) = post_json(&a, "/api/faucet", &huge).await;
     assert!(status.is_client_error(), "an unbounded body must not be read; got {status}");
 }
+
+// ------------------------------------------------ the real wallet-backed source
+
+/// A wallet restored from a fixed mnemonic, so the test is deterministic.
+///
+/// `MIN_PBKDF2_ITERATIONS` rather than the production work factor: this test is
+/// about the faucet, and a 600 000-round KDF would make it the slowest thing in
+/// the suite while proving nothing extra.
+fn test_wallet(dir: &std::path::Path) -> ferrum_wallet::Wallet {
+    let phrase = "abandon abandon abandon abandon abandon abandon \
+                  abandon abandon abandon abandon abandon about";
+    let mnemonic = ferrum_crypto::Mnemonic::from_phrase(phrase).unwrap();
+    ferrum_wallet::Wallet::restore_with_params(
+        &dir.join("faucet.json"),
+        ferrum_types::Network::Devnet,
+        &mnemonic,
+        "a passphrase",
+        ferrum_wallet::KeystoreParams { iterations: ferrum_wallet::MIN_PBKDF2_ITERATIONS },
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_wallet_backed_faucet_with_no_coins_reports_drained() {
+    use crate::faucet::WalletFaucetSource;
+
+    let f = Fixture::build(1, false);
+    let dir = tempfile::tempdir().unwrap();
+    let wallet = Arc::new(parking_lot::Mutex::new(test_wallet(dir.path())));
+    let source = WalletFaucetSource::new(wallet, f.provider(), 1_000);
+
+    let err = source.build_payment(&f.recipient, ferrum_types::Amount::from_grains(1)).unwrap_err();
+    assert_eq!(err.code(), RpcErrorCode::FaucetDrained);
+    assert!(err.detail().contains("no coins"), "{}", err.detail());
+}
+
+/// Fund `address` with a **non-coinbase** output and return the chain.
+///
+/// A coinbase would not do: `ferrum-wallet` applies the network's own
+/// hundred-block maturity window, not the fixture's shortened one, so a wallet
+/// funded by mining would see nothing spendable for a hundred blocks. Paying it
+/// from a mature coinbase is both faster and closer to how a real faucet is
+/// topped up.
+fn funded(f: &Fixture, address: &ferrum_crypto::Address, amount: ferrum_types::Amount) {
+    let first = f.block(&f.blocks[0]);
+    let prevout = crate::tests::fixture::coinbase_output(&first, 1);
+    let payment = crate::tests::fixture::spend_p2pkh(
+        prevout,
+        &f.miner_key,
+        &address.script_pubkey(),
+        amount,
+        f.chain.params.chain_id,
+    );
+    f.chain.mine_and_connect(&f.miner.script_pubkey(), vec![payment], 4_242);
+}
+
+#[test]
+fn a_funded_wallet_faucet_signs_a_spendable_payment() {
+    use crate::faucet::WalletFaucetSource;
+
+    let f = Fixture::build(3, false);
+    let dir = tempfile::tempdir().unwrap();
+    let mut wallet = test_wallet(dir.path());
+    let faucet_address = wallet.new_address().unwrap();
+    funded(&f, &faucet_address, ferrum_types::Amount::from_grains(10 * ferrum_types::COIN));
+
+    let wallet = Arc::new(parking_lot::Mutex::new(wallet));
+    let source = WalletFaucetSource::new(Arc::clone(&wallet), f.provider(), 1_000);
+    let amount = ferrum_types::Amount::from_grains(ferrum_types::COIN);
+    let payment = source.build_payment(&f.recipient, amount).unwrap();
+
+    // The payment must be a real, verifiable transaction, not a skeleton.
+    assert!(!payment.inputs.is_empty());
+    assert!(payment.outputs.iter().any(|o| o.value == amount));
+    let prevouts: Vec<ferrum_types::Coin> =
+        payment.inputs.iter().map(|i| f.coin(&i.prev_out)).collect();
+    wallet
+        .lock()
+        .verify_transaction(&payment, &prevouts, f.chain.params.chain_id)
+        .expect("the faucet signs a transaction that verifies");
+}
+
+#[test]
+fn a_wallet_faucet_refuses_an_address_from_another_network() {
+    use crate::faucet::WalletFaucetSource;
+
+    let f = Fixture::build(3, false);
+    let dir = tempfile::tempdir().unwrap();
+    let mut wallet = test_wallet(dir.path());
+    let faucet_address = wallet.new_address().unwrap();
+    funded(&f, &faucet_address, ferrum_types::Amount::from_grains(10 * ferrum_types::COIN));
+
+    let (_, public) = crate::tests::fixture::key(77);
+    let mainnet = ferrum_crypto::Address::p2pkh(ferrum_types::Network::Mainnet, &public);
+    let source =
+        WalletFaucetSource::new(Arc::new(parking_lot::Mutex::new(wallet)), f.provider(), 1_000);
+    let err = source
+        .build_payment(&mainnet, ferrum_types::Amount::from_grains(ferrum_types::COIN))
+        .unwrap_err();
+    assert_eq!(err.code(), RpcErrorCode::InvalidAddress);
+}
+
+#[test]
+fn a_faucet_over_a_real_wallet_still_rate_limits() {
+    use crate::faucet::WalletFaucetSource;
+
+    let f = Fixture::build(3, false);
+    let dir = tempfile::tempdir().unwrap();
+    let mut wallet = test_wallet(dir.path());
+    let faucet_address = wallet.new_address().unwrap();
+    funded(&f, &faucet_address, ferrum_types::Amount::from_grains(10 * ferrum_types::COIN));
+
+    let source = Arc::new(WalletFaucetSource::new(
+        Arc::new(parking_lot::Mutex::new(wallet)),
+        f.provider(),
+        1_000,
+    ));
+    let faucet = Faucet::with_clock(FaucetConfig::default(), source, Arc::new(FrozenClock));
+    assert!(faucet.dispense(&f.recipient, "10.0.0.1").is_ok());
+    let err = faucet.dispense(&f.recipient, "10.0.0.1").unwrap_err();
+    assert_eq!(err.code(), RpcErrorCode::FaucetRateLimited);
+}

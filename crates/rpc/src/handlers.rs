@@ -147,10 +147,8 @@ impl FerrumRpcServer for FerrumRpcImpl {
     async fn get_block_template(&self, payout_address: String) -> RpcResult<TemplateJson> {
         let (chain, mempool) = self.ctx.handles();
         let now = now_ms();
-        Ok(blocking(move || {
-            mining::block_template(&*chain, &*mempool, &payout_address, now)
-        })
-        .await?)
+        Ok(blocking(move || mining::block_template(&*chain, &*mempool, &payout_address, now))
+            .await?)
     }
 
     async fn submit_block(&self, hex: String) -> RpcResult<SubmitBlockResult> {

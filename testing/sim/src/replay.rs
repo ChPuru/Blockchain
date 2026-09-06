@@ -74,11 +74,7 @@ impl RecordedChain {
     pub fn generate(seed: u64, blocks: usize) -> Result<Self, SimError> {
         let mut chain = ChainBuilder::devnet(seed)?;
         generate_workload(&mut chain, blocks)?;
-        Ok(RecordedChain {
-            params: chain.params().clone(),
-            blocks: chain.blocks().to_vec(),
-            seed,
-        })
+        Ok(RecordedChain { params: chain.params().clone(), blocks: chain.blocks().to_vec(), seed })
     }
 
     /// The committed golden sequence.
@@ -167,16 +163,11 @@ fn plan_transactions(
             }
             _ => {
                 // Two outputs, so `created` is not always length one.
-                let half = payable
-                    .checked_div_u64(2)
-                    .unwrap_or(Amount::ZERO);
+                let half = payable.checked_div_u64(2).unwrap_or(Amount::ZERO);
                 let rest = payable.saturating_sub(half);
                 TxPlan {
                     inputs: coins,
-                    outputs: vec![
-                        (Lock::P2pkh { key: 10 }, half),
-                        (Lock::P2pkh { key: 11 }, rest),
-                    ],
+                    outputs: vec![(Lock::P2pkh { key: 10 }, half), (Lock::P2pkh { key: 11 }, rest)],
                     ..TxPlan::default()
                 }
             }
@@ -329,10 +320,9 @@ impl GoldenRoots {
                 detail: format!("malformed: {e}"),
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(SimError::Golden {
-                path: path.display().to_string(),
-                detail: e.to_string(),
-            }),
+            Err(e) => {
+                Err(SimError::Golden { path: path.display().to_string(), detail: e.to_string() })
+            }
         }
     }
 
@@ -342,15 +332,11 @@ impl GoldenRoots {
     ///
     /// [`SimError::Golden`] on any filesystem or serialisation failure.
     pub fn store(&self, path: &Path) -> Result<(), SimError> {
-        let fail = |detail: String| SimError::Golden {
-            path: path.display().to_string(),
-            detail,
-        };
+        let fail = |detail: String| SimError::Golden { path: path.display().to_string(), detail };
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| fail(e.to_string()))?;
         }
-        let mut text =
-            serde_json::to_string_pretty(self).map_err(|e| fail(e.to_string()))?;
+        let mut text = serde_json::to_string_pretty(self).map_err(|e| fail(e.to_string()))?;
         text.push('\n');
         std::fs::write(path, text).map_err(|e| fail(e.to_string()))
     }

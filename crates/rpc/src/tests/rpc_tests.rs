@@ -12,8 +12,8 @@ use ferrum_types::{Amount, Transaction};
 
 use crate::api::FerrumRpcServer;
 use crate::error::RpcErrorCode;
-use crate::provider::MempoolProvider;
 use crate::handlers::{FerrumRpcImpl, chain, mining, tx};
+use crate::provider::MempoolProvider;
 use crate::tests::fixture::{Fixture, StubMempool, address};
 use crate::types::rpc::{BlockTxList, GetBlockResult, GetRawTransactionResult, RawMempoolResult};
 
@@ -253,7 +253,7 @@ async fn sendrawtransaction_rejects_well_formed_hex_that_is_not_a_transaction() 
 #[tokio::test]
 async fn gettxout_returns_an_unspent_coinbase_output() {
     let f = Fixture::build(2, false);
-    let block = f.chain.store.get_block(&f.blocks[0]).unwrap().unwrap();
+    let block = f.block(&f.blocks[0]);
     let coinbase_id = txid(&block.txs[0]);
     let coin = server(&f).get_tx_out(coinbase_id.to_hex(), 0).await.unwrap().unwrap();
     assert!(coin.is_coinbase);
@@ -266,7 +266,7 @@ async fn gettxout_returns_an_unspent_coinbase_output() {
 #[tokio::test]
 async fn gettxout_returns_null_for_a_spent_output() {
     let f = Fixture::build(2, true);
-    let block = f.chain.store.get_block(&f.blocks[0]).unwrap().unwrap();
+    let block = f.block(&f.blocks[0]);
     let coinbase_id = txid(&block.txs[0]);
     let coin = server(&f).get_tx_out(coinbase_id.to_hex(), 0).await.unwrap();
     assert!(coin.is_none(), "the fixture's spend consumed this output");
@@ -275,7 +275,7 @@ async fn gettxout_returns_null_for_a_spent_output() {
 #[tokio::test]
 async fn gettxout_amounts_are_json_strings() {
     let f = Fixture::build(1, false);
-    let block = f.chain.store.get_block(&f.blocks[0]).unwrap().unwrap();
+    let block = f.block(&f.blocks[0]);
     let id = txid(&block.txs[0]);
     let coin = server(&f).get_tx_out(id.to_hex(), 0).await.unwrap().unwrap();
     let json = serde_json::to_value(&coin).unwrap();
@@ -304,8 +304,7 @@ async fn getrawmempool_lists_ids_by_default_and_entries_when_verbose() {
     };
     assert_eq!(ids, vec![id.to_hex()]);
 
-    let RawMempoolResult::Verbose(map) =
-        server(&f).get_raw_mempool(Some(true)).await.unwrap()
+    let RawMempoolResult::Verbose(map) = server(&f).get_raw_mempool(Some(true)).await.unwrap()
     else {
         panic!("verbose must be a map");
     };
@@ -358,11 +357,8 @@ async fn a_template_can_be_sealed_and_submitted() {
     let header = ferrum_types::BlockHeader::from_bytes(
         &<[u8; ferrum_types::HEADER_SIZE]>::try_from(header_bytes.as_slice()).unwrap(),
     );
-    let txs: Vec<Transaction> = template
-        .transactions
-        .iter()
-        .map(|hexed| tx::decode_tx_hex(hexed).unwrap())
-        .collect();
+    let txs: Vec<Transaction> =
+        template.transactions.iter().map(|hexed| tx::decode_tx_hex(hexed).unwrap()).collect();
     let sealed = crate::tests::fixture::seal(header);
     let block = ferrum_types::Block::new(sealed, txs, ferrum_types::BlockSeal::POW);
     let raw = chain::encode_block_hex(&block).unwrap();
@@ -377,7 +373,7 @@ async fn a_template_can_be_sealed_and_submitted() {
 #[tokio::test]
 async fn submitblock_reports_a_duplicate_rather_than_failing() {
     let f = Fixture::build(2, false);
-    let block = f.chain.store.get_block(&f.blocks[1]).unwrap().unwrap();
+    let block = f.block(&f.blocks[1]);
     let raw = chain::encode_block_hex(&block).unwrap();
     let outcome = server(&f).submit_block(raw).await.unwrap();
     assert!(!outcome.accepted);
@@ -413,7 +409,7 @@ async fn submitblock_rejects_hex_that_is_not_a_block() {
 async fn getstateroot_returns_the_tip_root() {
     let f = Fixture::build(2, false);
     let root = server(&f).get_state_root(None).await.unwrap();
-    assert_eq!(root, f.chain.store.state_root().unwrap().to_hex());
+    assert_eq!(root, f.state_root());
     let at_tip = server(&f).get_state_root(Some(f.tip_height())).await.unwrap();
     assert_eq!(at_tip, root);
 }
@@ -458,8 +454,8 @@ async fn getnetworkinfo_names_the_chain_and_the_local_peer() {
 #[tokio::test]
 async fn a_node_without_a_network_still_answers_getpeerinfo() {
     let f = Fixture::build(1, false);
-    let ctx = crate::context::NodeContext::new(f.provider())
-        .with_mempool(Arc::new(StubMempool::new()));
+    let ctx =
+        crate::context::NodeContext::new(f.provider()).with_mempool(Arc::new(StubMempool::new()));
     let peers = FerrumRpcImpl::new(ctx).get_peer_info().await.unwrap();
     assert!(peers.is_empty());
 }
@@ -513,7 +509,7 @@ async fn a_signed_spend_travels_from_sendrawtransaction_to_a_block() {
     // real transaction against a mature coinbase, relay it, see it in the
     // mempool, mine it, and read it back out of the chain.
     let f = Fixture::build(3, false);
-    let first = f.chain.store.get_block(&f.blocks[0]).unwrap().unwrap();
+    let first = f.block(&f.blocks[0]);
     let prevout = crate::tests::fixture::coinbase_output(&first, 1);
     let value = prevout.1.value.checked_sub(Amount::from_grains(5_000)).unwrap();
     let signed = crate::tests::fixture::spend_p2pkh(

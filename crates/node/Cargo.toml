@@ -22,9 +22,13 @@ ferrum-mempool = { workspace = true }
 ferrum-p2p = { workspace = true }
 ferrum-rpc = { workspace = true }
 ferrum-wallet = { workspace = true }
+clap = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 futures = { workspace = true }
+async-trait = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
@@ -41,4 +45,5 @@ humantime = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 

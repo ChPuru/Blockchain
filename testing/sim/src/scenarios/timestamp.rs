@@ -11,10 +11,10 @@
 //! 1. **`timestamp_ms > median_time_past(parent) * 1000`, strictly.** The
 //!    median of the last eleven headers cannot be moved by a minority miner,
 //!    and equality is rejected so the clock cannot be frozen across a whole
-//!    window ([`ConsensusError::TimestampTooOld`]).
+//!    window ([`ferrum_consensus::ConsensusError::TimestampTooOld`]).
 //! 2. **`bits == next_bits(parent)`, exactly.** There is one correct target per
 //!    parent; a block that *over*-pays difficulty is just as invalid as one
-//!    that under-pays ([`ConsensusError::BadDifficultyTransition`]). This rule
+//!    that under-pays ([`ferrum_consensus::ConsensusError::BadDifficultyTransition`]). This rule
 //!    needs the header chain, so it lives in the engine rather than inside the
 //!    pure state-transition seam.
 //! 3. **ASERT is stateless with respect to recent history.** `next_bits`
@@ -83,10 +83,7 @@ pub fn next_target(chain: &ChainBuilder) -> Result<Target, SimError> {
 ///
 /// [`SimError::Consensus`] with the engine's verdict, and
 /// [`SimError::Fixture`] when the chain has no tip.
-pub fn engine_header_verdict(
-    chain: &ChainBuilder,
-    header: &BlockHeader,
-) -> Result<(), SimError> {
+pub fn engine_header_verdict(chain: &ChainBuilder, header: &BlockHeader) -> Result<(), SimError> {
     let engine = PowEngine::new(chain.params().clone());
     let parent = chain.tip_header()?;
     engine.validate_header(header, &parent, &chain.header_view())?;
@@ -204,9 +201,8 @@ mod tests {
         let required = chain.next_bits().unwrap();
         let easier = chain.params().genesis_bits;
         assert_ne!(easier, required, "the fixture must actually differ from the rule");
-        let candidate = chain
-            .build_block(&BlockPlan { bits: Some(easier), ..BlockPlan::default() })
-            .unwrap();
+        let candidate =
+            chain.build_block(&BlockPlan { bits: Some(easier), ..BlockPlan::default() }).unwrap();
         match engine_header_verdict(&chain, &candidate.header).unwrap_err() {
             SimError::Consensus(ConsensusError::BadDifficultyTransition { expected, actual }) => {
                 assert_eq!(expected, required);
@@ -224,9 +220,8 @@ mod tests {
         let mut chain = on_schedule(102);
         let required = chain.next_bits().unwrap();
         let harder = CompactTarget(required.to_u32().saturating_sub(1));
-        let candidate = chain
-            .build_block(&BlockPlan { bits: Some(harder), ..BlockPlan::default() })
-            .unwrap();
+        let candidate =
+            chain.build_block(&BlockPlan { bits: Some(harder), ..BlockPlan::default() }).unwrap();
         assert!(matches!(
             engine_header_verdict(&chain, &candidate.header).unwrap_err(),
             SimError::Consensus(ConsensusError::BadDifficultyTransition { .. })
@@ -351,8 +346,8 @@ mod tests {
         // The attack is rejected by the difficulty rule, not by pretending the
         // late block never existed: a two-hour-late stamp is legal, it just
         // buys nothing.
-        let mut chain = chain_with_one_late_stamp(retarget_params(), 16, 12, 12, TWO_HOURS_MS)
-            .unwrap();
+        let mut chain =
+            chain_with_one_late_stamp(retarget_params(), 16, 12, 12, TWO_HOURS_MS).unwrap();
         assert_eq!(chain.height(), 12);
         let ctx = chain.next_ctx().unwrap();
         let pre = chain.state_view();

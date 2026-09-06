@@ -5,11 +5,11 @@
 //!
 //! 1. **Two inputs of one transaction naming the same outpoint.** Caught by
 //!    SPEC §4.1's duplicate-input check, before any state is touched, as
-//!    [`ValidationError::DuplicateInput`].
+//!    [`ferrum_chain::ValidationError::DuplicateInput`].
 //! 2. **Two transactions in one block spending the same coin.** The first
 //!    transaction's inputs are marked spent in the overlay before the next
 //!    transaction is validated (SPEC §4.2 step 4), so the second sees nothing
-//!    there and fails with [`ValidationError::MissingInput`] naming *its* index
+//!    there and fails with [`ferrum_chain::ValidationError::MissingInput`] naming *its* index
 //!    in the block.
 //!
 //! The redundancy is on purpose. The overlay alone would catch both, but the

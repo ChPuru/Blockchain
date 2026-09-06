@@ -43,7 +43,7 @@
 //! | [`chain_builder`] | [`ChainBuilder`] — the block and transaction factory |
 //! | [`mutate`] | the catalogue of single-defect invalid blocks |
 //! | [`node`] | [`SimNode`] — a real store, router and chain manager |
-//! | [`reference`] | the second, naive state transition |
+//! | [`reference`](mod@reference) | the second, naive state transition |
 //! | [`replay`] | the determinism harness and the golden file |
 //! | [`scenarios`] | one module per adversarial case |
 //! | [`error`] | [`SimError`] |
@@ -85,7 +85,6 @@ pub use crate::error::SimError;
 pub use crate::keys::{DEFAULT_KEYRING_SIZE, KEYRING_DOMAIN, KeyRing, Lock};
 pub use crate::mutate::{Mutation, invalid_variants};
 pub use crate::node::SimNode;
-pub use crate::scenarios::{Verdict, judge, matured_chain};
 pub use crate::prng::XorShift64;
 pub use crate::reference::{
     apply_block_reference, reference_block_hash, reference_check_coinbase_script_sig,
@@ -95,5 +94,6 @@ pub use crate::reference::{
 pub use crate::replay::{
     GOLDEN_FILE_NAME, GoldenOutcome, GoldenRoots, RecordedChain, golden_path, replay_state_roots,
 };
+pub use crate::scenarios::{Verdict, judge, matured_chain};
 pub use crate::sign::{push_bytes, signature_for, unlock};
 pub use crate::view::{SimHeaderView, median_time_past_of};

@@ -13,14 +13,14 @@
 //! Ferrum enforces both from genesis, and this module checks all three layers:
 //!
 //! 1. **Within one block** — two transactions with the same txid is
-//!    [`ValidationError::DuplicateTransaction`] (SPEC §3.1 rule 4).
+//!    [`ferrum_chain::ValidationError::DuplicateTransaction`] (SPEC §3.1 rule 4).
 //! 2. **BIP-34** — the coinbase `script_sig` must be 2..=100 bytes and begin
 //!    with a *minimally encoded* push of this height
-//!    ([`ValidationError::CoinbaseHeightMismatch`],
-//!    [`ValidationError::CoinbaseMissingHeightPush`],
-//!    [`ValidationError::CoinbaseScriptSigLength`]).
+//!    ([`ferrum_chain::ValidationError::CoinbaseHeightMismatch`],
+//!    [`ferrum_chain::ValidationError::CoinbaseMissingHeightPush`],
+//!    [`ferrum_chain::ValidationError::CoinbaseScriptSigLength`]).
 //! 3. **Rule 15** — no created outpoint may already exist in the UTXO set
-//!    ([`ValidationError::DuplicateOutPoint`]), which is defence in depth on
+//!    ([`ferrum_chain::ValidationError::DuplicateOutPoint`]), which is defence in depth on
 //!    the inflation path and covers the non-coinbase case as well.
 //!
 //! **Red:** each of the three is rejected with its own variant.

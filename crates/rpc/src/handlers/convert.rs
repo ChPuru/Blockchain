@@ -27,8 +27,8 @@ use ferrum_types::{
 };
 
 use crate::error::{RpcError, RpcErrorCode};
-use crate::types::rpc::{BlockHeaderJson, TxInJson, TxOutJson};
 use crate::types::U64String;
+use crate::types::rpc::{BlockHeaderJson, TxInJson, TxOutJson};
 
 /// The number of decimal places [`difficulty_string`] renders.
 pub const DIFFICULTY_DECIMALS: u32 = 3;
@@ -424,10 +424,7 @@ mod tests {
     fn an_unresolved_prevout_yields_a_zero_fee_rather_than_a_wrong_one() {
         let tx = Transaction {
             version: 1,
-            inputs: vec![ferrum_types::TxIn::new(
-                OutPoint::new(Txid::ZERO, 0),
-                Script::EMPTY,
-            )],
+            inputs: vec![ferrum_types::TxIn::new(OutPoint::new(Txid::ZERO, 0), Script::EMPTY)],
             outputs: vec![TxOut::new(Amount::from_grains(10), Script::new(vec![0x51]))],
             lock_time: 0,
         };

@@ -37,8 +37,7 @@ impl SimNode {
         let store =
             Arc::new(Store::open_in_memory(StoreConfig::default().with_chain_id(params.chain_id))?);
         let engines = Arc::new(EngineRouter::new(params.clone())?);
-        let chain =
-            ChainManager::open(Arc::clone(&store), params.clone(), Arc::clone(&engines))?;
+        let chain = ChainManager::open(Arc::clone(&store), params.clone(), Arc::clone(&engines))?;
         chain.init_genesis()?;
         Ok(SimNode { store, engines, chain, params })
     }

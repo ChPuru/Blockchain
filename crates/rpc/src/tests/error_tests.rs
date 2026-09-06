@@ -36,11 +36,7 @@ async fn raw_post(addr: SocketAddr, body: &str) -> (u16, String) {
     let mut response = Vec::new();
     stream.read_to_end(&mut response).await.unwrap();
     let text = String::from_utf8_lossy(&response).into_owned();
-    let status = text
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(0);
+    let status = text.split_whitespace().nth(1).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
     let payload = text.split("\r\n\r\n").nth(1).unwrap_or("").to_owned();
     (status, payload)
 }
@@ -143,9 +139,8 @@ async fn a_hostile_hash_argument_is_rejected_rather_than_looked_up() {
     let f = Fixture::build(1, false);
     let server = serve(&f).await;
     let long = "f".repeat(100_000);
-    let request = format!(
-        r#"{{"jsonrpc":"2.0","id":1,"method":"getblock","params":["{long}",1]}}"#
-    );
+    let request =
+        format!(r#"{{"jsonrpc":"2.0","id":1,"method":"getblock","params":["{long}",1]}}"#);
     let (_, body) = raw_post(server.local_addr(), &request).await;
     assert_eq!(error_code(&body), i64::from(RpcErrorCode::InvalidHash.code()));
     server.stop();
@@ -158,8 +153,9 @@ async fn a_body_over_the_limit_is_refused_without_being_buffered() {
     let config = RpcServerConfig { max_request_body: 512, ..RpcServerConfig::at(listen) };
     let server = spawn_rpc_server(config, f.context()).await.unwrap();
     let padding = "a".repeat(4_096);
-    let request =
-        format!(r#"{{"jsonrpc":"2.0","id":1,"method":"getblockhash","params":[1],"pad":"{padding}"}}"#);
+    let request = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"getblockhash","params":[1],"pad":"{padding}"}}"#
+    );
     let (status, _) = raw_post(server.local_addr(), &request).await;
     assert_eq!(status, 413, "an oversized body must not be read into memory");
     server.stop();
@@ -180,11 +176,9 @@ async fn the_server_survives_the_requests_that_failed() {
     ] {
         let _ = raw_post(addr, hostile).await;
     }
-    let (_, body) = raw_post(
-        addr,
-        r#"{"jsonrpc":"2.0","id":9,"method":"getblockchaininfo","params":[]}"#,
-    )
-    .await;
+    let (_, body) =
+        raw_post(addr, r#"{"jsonrpc":"2.0","id":9,"method":"getblockchaininfo","params":[]}"#)
+            .await;
     let start = body.find('{').unwrap();
     let end = body.rfind('}').unwrap();
     let json: serde_json::Value = serde_json::from_str(&body[start..=end]).unwrap();

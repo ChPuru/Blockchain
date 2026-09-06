@@ -378,6 +378,12 @@ impl Mempool {
                 continue;
             };
             let cb_id = txid(cb);
+            // Whether *this* coinbase went away. The accumulated `vanished`
+            // set cannot answer that: a later block whose coinbase the new
+            // branch re-mined byte-for-byte would still see a non-empty set
+            // from an earlier block and evict orphans waiting on a coinbase
+            // that is still perfectly spendable.
+            let mut this_coinbase_vanished = false;
             for vout in 0..cb.outputs.len() {
                 let Ok(vout) = u32::try_from(vout) else {
                     continue;
@@ -387,9 +393,10 @@ impl Mempool {
                 // the coin in place; only a genuinely absent one is vanished.
                 if view.get_coin(&op).ok().flatten().is_none() {
                     vanished.insert(op);
+                    this_coinbase_vanished = true;
                 }
             }
-            if !vanished.is_empty() {
+            if this_coinbase_vanished {
                 let dropped = inner.orphans.drop_children_of(&cb_id);
                 if !dropped.is_empty() {
                     tracing::debug!(

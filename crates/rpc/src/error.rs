@@ -351,10 +351,9 @@ impl From<StorageError> for RpcError {
         // distinction is the difference between "your node is misconfigured"
         // and "your node is broken".
         match e {
-            StorageError::IndexDisabled => RpcError::new(
-                RpcErrorCode::IndexDisabled,
-                "this node was started without --index",
-            ),
+            StorageError::IndexDisabled => {
+                RpcError::new(RpcErrorCode::IndexDisabled, "this node was started without --index")
+            }
             other => RpcError::new(RpcErrorCode::StorageFailure, other.to_string()),
         }
     }

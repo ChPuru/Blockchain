@@ -177,8 +177,8 @@ impl ChainProvider for ChainHandle {
         txs: Vec<Transaction>,
         now_ms: u64,
     ) -> Result<BlockTemplate, RpcError> {
-        self.chain.build_template(payout, extra_nonce, txs, now_ms).map_err(|e| {
-            RpcError::new(RpcErrorCode::TemplateFailed, e.to_string())
-        })
+        self.chain
+            .build_template(payout, extra_nonce, txs, now_ms)
+            .map_err(|e| RpcError::new(RpcErrorCode::TemplateFailed, e.to_string()))
     }
 }

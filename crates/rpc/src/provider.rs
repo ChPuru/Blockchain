@@ -436,8 +436,9 @@ mod tests {
     fn only_extended_and_reorged_count_as_accepted() {
         let h = BlockHash::ZERO;
         assert!(SubmitOutcome::Extended(h).is_accepted());
-        assert!(SubmitOutcome::Reorged { from: h, to: h, disconnected: 0, connected: 1 }
-            .is_accepted());
+        assert!(
+            SubmitOutcome::Reorged { from: h, to: h, disconnected: 0, connected: 1 }.is_accepted()
+        );
         assert!(!SubmitOutcome::SideChain(h).is_accepted());
         assert!(!SubmitOutcome::Duplicate.is_accepted());
         assert!(!SubmitOutcome::Orphan.is_accepted());

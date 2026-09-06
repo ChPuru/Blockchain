@@ -12,16 +12,16 @@
 //! the first commit (SPEC §5 rule 6):
 //!
 //! * pushes must use the shortest opcode that can express the data —
-//!   [`ScriptError::NonMinimalPush`];
+//!   [`ferrum_script::ScriptError::NonMinimalPush`];
 //! * `ScriptNum` operands must be minimally encoded —
 //!   [`ScriptNum`](ferrum_script::ScriptNum) rejects `0x01 0x00` for `1` with
-//!   [`ScriptError::NonMinimalNum`];
+//!   [`ferrum_script::ScriptError::NonMinimalNum`];
 //! * `OP_IF`/`OP_NOTIF` accept only `{}` or `{0x01}` as the condition —
-//!   [`ScriptError::MinimalIf`];
-//! * `script_sig` must be push-only — [`ScriptError::PushOnly`].
+//!   [`ferrum_script::ScriptError::MinimalIf`];
+//! * `script_sig` must be push-only — [`ferrum_script::ScriptError::PushOnly`].
 //!
 //! Every rejection reaches a block as
-//! [`ValidationError::ScriptVerification`](ferrum_chain::ValidationError::ScriptVerification)
+//! [`ferrum_chain::ValidationError::ScriptVerification`]
 //! naming the transaction, the input and the underlying script error.
 //!
 //! **Red:** each non-minimal spelling is rejected with its own script error.
@@ -75,7 +75,11 @@ pub fn cltv_with_operand(operand: &[u8]) -> Vec<u8> {
 
 /// Wrap a raw locking/unlocking script pair as a spendable coin.
 #[must_use]
-pub fn raw_coin(base: &SpendableCoin, script_pubkey: Vec<u8>, script_sig: Vec<u8>) -> SpendableCoin {
+pub fn raw_coin(
+    base: &SpendableCoin,
+    script_pubkey: Vec<u8>,
+    script_sig: Vec<u8>,
+) -> SpendableCoin {
     SpendableCoin {
         out_point: base.out_point,
         coin: base.coin.clone(),
@@ -181,14 +185,9 @@ mod tests {
     fn a_pushdata1_that_a_direct_push_could_express_is_rejected() {
         let (mut chain, coin) = setup();
         // OP_PUSHDATA1 is only minimal above 75 bytes.
-        let verdict = spend_raw(
-            &mut chain,
-            &coin,
-            increment_to_two(),
-            vec![0x4c, 0x02, 0x01, 0x00],
-            0,
-        )
-        .unwrap();
+        let verdict =
+            spend_raw(&mut chain, &coin, increment_to_two(), vec![0x4c, 0x02, 0x01, 0x00], 0)
+                .unwrap();
         assert!(matches!(script_error(&verdict), ScriptError::NonMinimalPush { .. }));
     }
 
@@ -206,14 +205,9 @@ mod tests {
         let height = chain.height() + 1;
         let lock_time = u32::try_from(height.saturating_sub(1)).unwrap();
         // The locktime 10 spelled with a redundant zero byte.
-        let verdict = spend_raw(
-            &mut chain,
-            &coin,
-            cltv_with_operand(&[0x0a, 0x00]),
-            Vec::new(),
-            lock_time,
-        )
-        .unwrap();
+        let verdict =
+            spend_raw(&mut chain, &coin, cltv_with_operand(&[0x0a, 0x00]), Vec::new(), lock_time)
+                .unwrap();
         assert_eq!(script_error(&verdict), ScriptError::NonMinimalNum);
     }
 

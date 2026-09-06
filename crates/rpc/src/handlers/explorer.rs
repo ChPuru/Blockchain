@@ -211,9 +211,7 @@ pub fn tx_view(
                 address: coin
                     .as_ref()
                     .and_then(|c| convert::address_string(&c.script_pubkey, network)),
-                script_type: coin
-                    .as_ref()
-                    .map(|c| convert::script_type_name(&c.script_pubkey)),
+                script_type: coin.as_ref().map(|c| convert::script_type_name(&c.script_pubkey)),
             }
         })
         .collect();
@@ -320,10 +318,7 @@ pub fn search(chain: &dyn ChainProvider, query: &str) -> Result<SearchResponse, 
 
     if let Ok(hash) = ferrum_types::Hash32::from_hex(q) {
         if chain.header_entry(&BlockHash(hash))?.is_some() {
-            return Ok(SearchResponse {
-                kind: Some("block".to_owned()),
-                id: Some(hash.to_hex()),
-            });
+            return Ok(SearchResponse { kind: Some("block".to_owned()), id: Some(hash.to_hex()) });
         }
         // `tx_location` reports IndexDisabled without the index; a search that
         // cannot check is a search that found nothing, not a failed request.
@@ -333,10 +328,7 @@ pub fn search(chain: &dyn ChainProvider, query: &str) -> Result<SearchResponse, 
     }
 
     if let Ok(address) = convert::parse_address(q, chain.params().network) {
-        return Ok(SearchResponse {
-            kind: Some("address".to_owned()),
-            id: Some(address.encode()),
-        });
+        return Ok(SearchResponse { kind: Some("address".to_owned()), id: Some(address.encode()) });
     }
 
     Ok(SearchResponse::default())

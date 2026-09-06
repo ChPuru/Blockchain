@@ -36,9 +36,8 @@ pub fn block_template(
     let address = convert::parse_address(payout_address, params.network)?;
     let payout: Script = address.script_pubkey();
 
-    let budget = params
-        .max_block_size
-        .saturating_sub(params.max_block_size / TEMPLATE_HEADROOM_DIVISOR);
+    let budget =
+        params.max_block_size.saturating_sub(params.max_block_size / TEMPLATE_HEADROOM_DIVISOR);
     let txs = mempool.select_for_block(budget);
 
     // The extra-nonce widens the coinbase search space so that two miners

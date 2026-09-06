@@ -252,6 +252,124 @@ fn variant_name(e: &ValidationError) -> &'static str {
     }
 }
 
+/// Blocks that break **two** rules at once, to pin the order the rules are
+/// checked in.
+///
+/// SPEC §3 fixes an order and §3.4 requires tests to assert the exact variant,
+/// so ordering is observable behaviour rather than an implementation detail.
+/// Two places in the documents leave it under-determined — SPEC §3.1 rule 5
+/// checks transaction sanity before the header rules while CONTRACT §8.1 lists
+/// the header rules first, and the two documents state the coinbase's value
+/// and BIP-34 rules in opposite orders. A block that breaks only one rule
+/// cannot tell the readings apart; these can, and both executors must still
+/// agree.
+#[test]
+fn the_two_executors_agree_on_the_order_rules_are_checked_in() {
+    let mut chain = ChainBuilder::devnet(0x0dde_0000_0000_0001).unwrap();
+    chain.advance(103).unwrap();
+    let ctx = chain.next_ctx().unwrap();
+    let pre = chain.utxo().clone();
+    let height = ctx.height;
+
+    // A bad header version *and* a transaction with no outputs. Transaction
+    // sanity is a context-free rule, so it must win.
+    let block = chain
+        .build_block(&BlockPlan {
+            version: Some(0),
+            txs: vec![Transaction {
+                version: 1,
+                inputs: vec![ferrum_types::TxIn::new(
+                    OutPoint::new(ferrum_types::Txid::ZERO, 3),
+                    ferrum_types::Script::EMPTY,
+                )],
+                outputs: Vec::new(),
+                lock_time: 0,
+            }],
+            ..BlockPlan::default()
+        })
+        .unwrap();
+    let verdict = agree(&pre, &block, &ctx, "bad version and an output-less transaction");
+    assert_eq!(verdict, Err(ValidationError::NoOutputs));
+
+    // A bad header version *and* a coinbase whose `script_sig` is too short.
+    // The coinbase's BIP-34 rules are state-context rules, so the header wins.
+    let block = chain
+        .build_block(&BlockPlan {
+            version: Some(0),
+            coinbase: Some(Transaction {
+                version: 1,
+                inputs: vec![ferrum_types::TxIn::coinbase(ferrum_types::Script::new(vec![0x00]))],
+                outputs: vec![ferrum_types::TxOut::new(
+                    Amount::ZERO,
+                    ferrum_types::Script::new(vec![0x51]),
+                )],
+                lock_time: 0,
+            }),
+            ..BlockPlan::default()
+        })
+        .unwrap();
+    let verdict = agree(&pre, &block, &ctx, "bad version and a short coinbase script_sig");
+    assert!(matches!(verdict, Err(ValidationError::Header(_))), "got {verdict:?}");
+
+    // A coinbase that both overpays and commits to the wrong height: the
+    // structural rule is cheaper, so it is checked first.
+    let block = chain
+        .build_block(&BlockPlan {
+            coinbase_bonus: 1,
+            height: Some(height - 1),
+            ..BlockPlan::default()
+        })
+        .unwrap();
+    let verdict = agree(&pre, &block, &ctx, "an overpaying coinbase at the wrong height");
+    assert!(
+        matches!(verdict, Err(ValidationError::CoinbaseHeightMismatch { .. })),
+        "got {verdict:?}"
+    );
+
+    // An immature coinbase spend whose signature is also corrupt: maturity is
+    // checked for every input before any script runs.
+    let young = chain
+        .spendable()
+        .iter()
+        .rev()
+        .find(|c| c.coin.is_coinbase && !c.is_mature(height, chain.params().coinbase_maturity))
+        .cloned()
+        .expect("the most recent coinbase is immature");
+    let mut tx = chain
+        .build_tx(&TxPlan::sweep(vec![young], Lock::P2pkh { key: 4 }, Amount::from_grains(1_000)))
+        .unwrap();
+    let mut bytes = tx.inputs[0].script_sig.as_bytes().to_vec();
+    bytes[1] ^= 0x01;
+    tx.inputs[0].script_sig = ferrum_types::Script::new(bytes);
+    let block = chain.build_block(&BlockPlan { txs: vec![tx], ..BlockPlan::default() }).unwrap();
+    let verdict = agree(&pre, &block, &ctx, "an immature spend with a corrupt signature");
+    assert!(
+        matches!(verdict, Err(ValidationError::ImmatureCoinbaseSpend { .. })),
+        "got {verdict:?}"
+    );
+
+    // A transaction that both overpays its inputs and is not final: the value
+    // rule is checked before finality.
+    let coin = chain.mature(height).first().cloned().expect("a mature coin");
+    let tx = chain
+        .build_tx(&TxPlan {
+            inputs: vec![coin.clone()],
+            outputs: vec![(
+                Lock::P2pkh { key: 6 },
+                coin.coin.value.checked_add(Amount::from_grains(1)).unwrap(),
+            )],
+            lock_time: u32::try_from(height + 50).unwrap(),
+            ..TxPlan::default()
+        })
+        .unwrap();
+    let block = chain.build_block(&BlockPlan { txs: vec![tx], ..BlockPlan::default() }).unwrap();
+    let verdict = agree(&pre, &block, &ctx, "an inflating, non-final transaction");
+    assert!(
+        matches!(verdict, Err(ValidationError::InsufficientInputValue { .. })),
+        "got {verdict:?}"
+    );
+}
+
 #[test]
 fn the_two_executors_agree_on_a_chain_replayed_from_scratch() {
     // A second, independent seed, so the sweep above is not the only shape the
@@ -282,6 +400,6 @@ fn the_reference_reproduces_the_diff_order_production_promises() {
     // undo record depends on both.
     assert_eq!(diff.spent.len(), 3);
     assert_eq!(diff.created.len(), 2);
-    assert_eq!(diff.created[0].1.is_coinbase, true);
-    assert_eq!(diff.created[1].1.is_coinbase, false);
+    assert!(diff.created[0].1.is_coinbase, "the coinbase output comes first");
+    assert!(!diff.created[1].1.is_coinbase, "then the payment output");
 }

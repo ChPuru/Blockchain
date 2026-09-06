@@ -8,11 +8,12 @@
 //! exists to catch.
 
 use ferrum_chain::AcceptOutcome;
+use ferrum_consensus::PowEngine;
 use ferrum_storage::header_hash;
-use ferrum_types::{Block, OutPoint, Transaction};
+use ferrum_types::{Block, BlockSeal, OutPoint, Transaction};
 
 use crate::Mempool;
-use crate::tests::support::{TestChain, cfg, id, out, tx};
+use crate::tests::support::{TestChain, cfg, id, out, seal_pow, tx};
 
 /// The value of the coin at `op`.
 fn value_at(t: &TestChain, op: &OutPoint) -> u64 {
@@ -325,4 +326,78 @@ fn a_reorg_deeper_than_the_pool_has_seen_leaves_a_consistent_pool() {
     assert_eq!(pool.spender_of(&doomed), None);
     assert_eq!(pool.size_bytes(), 0);
     assert!(!pool.contains(&id(&payment)));
+}
+
+#[test]
+fn a_coinbase_the_new_branch_re_mined_does_not_evict_its_orphans() {
+    // The set of vanished coinbase outputs is accumulated across every
+    // disconnected block, but the decision to evict an orphan is per-coinbase.
+    // A reorg in which the tip block's coinbase disappears while a deeper one
+    // is re-mined byte-for-byte must not take the deeper block's orphans with
+    // it: those coins are still perfectly spendable.
+    let t = TestChain::new();
+    let (genesis, _) = t.tip();
+
+    let a1 = t.mine_on(&genesis, Vec::new(), 1);
+    let a1_hash = header_hash(&a1.header);
+    t.accept(a1.clone());
+    let a2 = t.mine_on(&a1_hash, Vec::new(), 2);
+    t.accept(a2.clone());
+    assert_eq!(t.height(), 2);
+
+    let cb1 = a1.coinbase().expect("block 1 has a coinbase").clone();
+    let cb2 = a2.coinbase().expect("block 2 has a coinbase").clone();
+
+    // One orphan waiting on each coinbase. Output 1 of a coinbase does not
+    // exist, so both are held rather than admitted, and each is keyed on the
+    // coinbase txid it is waiting for.
+    let pool = Mempool::new(cfg());
+    let on_cb1 = tx(&[OutPoint::new(id(&cb1), 1)], &[1_000]);
+    let on_cb2 = tx(&[OutPoint::new(id(&cb2), 1)], &[1_000]);
+    for orphan in [&on_cb1, &on_cb2] {
+        assert!(
+            pool.accept(orphan.clone(), t.view(), t.height(), t.mtp())
+                .expect("an unresolvable input is held, not an error")
+                .is_orphan()
+        );
+    }
+    assert_eq!(pool.orphan_count(), 2);
+
+    // The winning branch re-mines block 1's coinbase byte for byte — a
+    // different header carrying the identical transaction — and mines a
+    // different coinbase at height 2.
+    // Only the nonce differs: the ASERT anchor is the height-1 header, so a
+    // changed timestamp there would move every descendant's target and the
+    // branch would not validate.
+    let mut header = a1.header;
+    PowEngine::advance_search(&mut header);
+    let b1 = Block::new(seal_pow(header), vec![cb1.clone()], BlockSeal::POW);
+    let b1_hash = header_hash(&b1.header);
+    assert_ne!(b1_hash, a1_hash, "a different block");
+    assert_eq!(id(b1.coinbase().expect("coinbase")), id(&cb1), "carrying the same coinbase");
+    assert_eq!(t.accept(b1.clone()), AcceptOutcome::SideChain(b1_hash));
+
+    let b2 = t.mine_on(&b1_hash, Vec::new(), 77);
+    let b2_hash = header_hash(&b2.header);
+    assert_eq!(t.accept(b2.clone()), AcceptOutcome::SideChain(b2_hash));
+    let b3 = t.mine_on(&b2_hash, Vec::new(), 78);
+    assert!(matches!(t.accept(b3.clone()), AcceptOutcome::Reorged { .. }));
+    assert_eq!(t.height(), 3);
+
+    // Block 1's coinbase survived the reorganisation; block 2's did not.
+    assert!(t.store.get_coin(&out(&cb1, 0)).expect("read").is_some());
+    assert!(t.store.get_coin(&out(&cb2, 0)).expect("read").is_none());
+
+    // `disconnected` is tip-first, exactly as `AcceptOutcome::Reorged` gives it.
+    pool.reconcile_reorg(&[a2, a1], &[b1, b2, b3], t.view(), t.height());
+
+    let held = pool.orphan_txids();
+    assert!(
+        !held.contains(&id(&on_cb2)),
+        "the orphan waiting on a coinbase the reorg removed is dead and must go"
+    );
+    assert!(
+        held.contains(&id(&on_cb1)),
+        "the orphan waiting on a coinbase the new branch re-mined must survive"
+    );
 }

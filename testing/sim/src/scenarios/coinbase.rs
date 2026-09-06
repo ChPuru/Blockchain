@@ -13,7 +13,7 @@
 //! [`ferrum_types::Amount`], which has no `impl Add` precisely so that every
 //! monetary step is a `checked_*` call whose `None` is a typed error.
 //!
-//! **Red:** claiming one grain over is [`ValidationError::CoinbaseOverpayment`]
+//! **Red:** claiming one grain over is [`ferrum_chain::ValidationError::CoinbaseOverpayment`]
 //! with the exact claimed and allowed amounts.
 //! **Green:** claiming exactly the allowance is valid, and claiming *less* is
 //! also valid — the difference is burned, which a miner is free to do.
@@ -60,10 +60,10 @@ mod tests {
     use ferrum_chain::ValidationError;
 
     use super::*;
+    use crate::chain_builder::TxPlan;
     use crate::keys::Lock;
     use crate::prng::XorShift64;
     use crate::scenarios::matured_chain;
-    use crate::chain_builder::TxPlan;
 
     fn chain() -> ChainBuilder {
         ChainBuilder::devnet(XorShift64::SCENARIO_SEED).unwrap()
@@ -89,10 +89,7 @@ mod tests {
     fn a_large_overpayment_is_rejected_by_the_same_rule() {
         let mut c = chain();
         let verdict = coinbase_claiming(&mut c, 50 * ferrum_types::COIN, 0).unwrap();
-        assert!(matches!(
-            verdict.rejection(),
-            Some(ValidationError::CoinbaseOverpayment { .. })
-        ));
+        assert!(matches!(verdict.rejection(), Some(ValidationError::CoinbaseOverpayment { .. })));
     }
 
     #[test]
@@ -101,10 +98,7 @@ mod tests {
         // a fee-sized bonus is claiming money nobody spent.
         let mut c = matured_chain(11, 2).unwrap();
         let verdict = coinbase_claiming(&mut c, 10_000, 0).unwrap();
-        assert!(matches!(
-            verdict.rejection(),
-            Some(ValidationError::CoinbaseOverpayment { .. })
-        ));
+        assert!(matches!(verdict.rejection(), Some(ValidationError::CoinbaseOverpayment { .. })));
     }
 
     // ---- green ---------------------------------------------------------
@@ -121,9 +115,10 @@ mod tests {
         let allowed = empty_block_allowance(&c).unwrap();
         let verdict = coinbase_claiming(&mut c, 0, 1).unwrap();
         let diff = verdict.diff().expect("under-claiming is legal");
-        let claimed = diff.created.iter().fold(Amount::ZERO, |a, (_, c)| {
-            a.checked_add(c.value).unwrap_or(Amount::MAX_MONEY)
-        });
+        let claimed = diff
+            .created
+            .iter()
+            .fold(Amount::ZERO, |a, (_, c)| a.checked_add(c.value).unwrap_or(Amount::MAX_MONEY));
         assert_eq!(claimed, allowed.checked_sub(Amount::from_grains(1)).unwrap());
     }
 
@@ -141,8 +136,8 @@ mod tests {
         let subsidy = c.params().block_subsidy(height);
 
         // Exactly subsidy + fee is fine.
-        let ok = c.build_block(&BlockPlan { txs: vec![tx.clone()], ..BlockPlan::default() })
-            .unwrap();
+        let ok =
+            c.build_block(&BlockPlan { txs: vec![tx.clone()], ..BlockPlan::default() }).unwrap();
         let verdict = judge(&pre, &ok, &ctx).unwrap();
         assert!(verdict.is_accepted());
         assert_eq!(
@@ -153,11 +148,7 @@ mod tests {
 
         // One grain more is not.
         let bad = c
-            .build_block(&BlockPlan {
-                txs: vec![tx],
-                coinbase_bonus: 1,
-                ..BlockPlan::default()
-            })
+            .build_block(&BlockPlan { txs: vec![tx], coinbase_bonus: 1, ..BlockPlan::default() })
             .unwrap();
         match judge(&pre, &bad, &ctx).unwrap().rejection() {
             Some(ValidationError::CoinbaseOverpayment { claimed, allowed }) => {

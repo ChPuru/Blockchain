@@ -34,9 +34,8 @@ pub fn blockchain_info(
         // target is the honest answer for "difficulty of nothing".
         None => convert::pow_limit_target(params),
     };
-    let total_work = entry
-        .as_ref()
-        .map_or_else(|| chain.tip_work().unwrap_or([0u8; 32]), |e| e.total_work);
+    let total_work =
+        entry.as_ref().map_or_else(|| chain.tip_work().unwrap_or([0u8; 32]), |e| e.total_work);
 
     Ok(BlockchainInfo {
         chain: params.network.name().to_owned(),
@@ -58,12 +57,9 @@ pub fn blockchain_info(
 /// # Errors
 /// [`RpcErrorCode::HeightOutOfRange`] past the tip.
 pub fn block_hash_at(chain: &dyn ChainProvider, height: u64) -> Result<String, RpcError> {
-    chain
-        .hash_at_height(height)?
-        .map(|h| h.to_hex())
-        .ok_or_else(|| {
-            RpcError::new(RpcErrorCode::HeightOutOfRange, format!("no block at height {height}"))
-        })
+    chain.hash_at_height(height)?.map(|h| h.to_hex()).ok_or_else(|| {
+        RpcError::new(RpcErrorCode::HeightOutOfRange, format!("no block at height {height}"))
+    })
 }
 
 /// `getblock(hash, verbosity)`.

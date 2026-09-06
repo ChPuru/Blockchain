@@ -234,3 +234,43 @@ async fn both_listeners_can_share_one_context() {
     rpc.stop();
     explorer.stopped().await;
 }
+
+#[tokio::test]
+async fn one_port_serves_both_http_and_websocket() {
+    // CONTRACT §11 says JSON-RPC 2.0 "over HTTP and WebSocket". `jsonrpsee`
+    // multiplexes them on one listener by upgrading; this test is the proof
+    // that the upgrade path is actually enabled rather than merely configured.
+    use jsonrpsee::ws_client::WsClientBuilder;
+
+    let f = Fixture::build(2, false);
+    let server = spawn_rpc_server(RpcServerConfig::at(ephemeral()), f.context()).await.unwrap();
+
+    let over_http = HttpClientBuilder::default().build(server.http_url()).unwrap();
+    let over_ws = WsClientBuilder::default().build(server.ws_url()).await.unwrap();
+
+    let http_info = over_http.get_blockchain_info().await.unwrap();
+    let ws_info = over_ws.get_blockchain_info().await.unwrap();
+    assert_eq!(http_info, ws_info, "the same port must give the same answer either way");
+    assert_eq!(ws_info.height, 2);
+
+    server.stop();
+}
+
+#[tokio::test]
+async fn a_websocket_upgrade_is_refused_when_the_server_is_http_only() {
+    use jsonrpsee::ws_client::WsClientBuilder;
+
+    let f = Fixture::build(1, false);
+    let config = RpcServerConfig { websocket: false, ..RpcServerConfig::at(ephemeral()) };
+    let server = spawn_rpc_server(config, f.context()).await.unwrap();
+
+    assert!(
+        WsClientBuilder::default().build(server.ws_url()).await.is_err(),
+        "a node that advertises no WebSocket must not half-accept one"
+    );
+    // HTTP still works.
+    let client = HttpClientBuilder::default().build(server.http_url()).unwrap();
+    assert_eq!(client.get_blockchain_info().await.unwrap().height, 1);
+
+    server.stop();
+}

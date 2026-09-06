@@ -41,11 +41,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Json;
+use axum::Router;
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use serde::Deserialize;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -172,8 +172,7 @@ async fn stats(State(state): State<RestState>) -> Result<Json<StatsResponse>, Rp
     let peers = state.ctx.network().peers().await.len();
     let faucet_enabled = state.ctx.faucet_enabled();
     let (chain, mempool) = state.ctx.handles();
-    let body =
-        blocking(move || explorer::stats(&*chain, &*mempool, peers, faucet_enabled)).await?;
+    let body = blocking(move || explorer::stats(&*chain, &*mempool, peers, faucet_enabled)).await?;
     Ok(Json(body))
 }
 
@@ -234,10 +233,7 @@ async fn faucet(
     Json(request): Json<FaucetRequest>,
 ) -> Result<Json<FaucetResponse>, RpcError> {
     let Some(faucet) = state.ctx.faucet().cloned() else {
-        return Err(RpcError::new(
-            RpcErrorCode::FaucetDisabled,
-            "this node does not run a faucet",
-        ));
+        return Err(RpcError::new(RpcErrorCode::FaucetDisabled, "this node does not run a faucet"));
     };
     let client = client_key(&state.config, &headers, peer);
     let network = state.ctx.chain().params().network;
@@ -246,12 +242,11 @@ async fn faucet(
     let requested = request.address.clone();
 
     let (txid, transaction, address) = blocking(move || {
+        // A node with no genesis has nothing to spend; saying so up front
+        // beats a confusing coin-selection error further down.
+        chain.tip()?;
         let address = convert::parse_address(&requested, network)?;
         let transaction = faucet.dispense(&address, &client)?;
-        // The chain handle is not used to build the payment — the source owns
-        // that — but a faucet on a node with no tip has nothing to spend, and
-        // saying so here beats a confusing selection error.
-        chain.tip()?;
         let txid = mempool.submit(transaction.clone())?;
         Ok((txid, transaction, address.encode()))
     })

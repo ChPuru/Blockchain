@@ -19,10 +19,7 @@
 use std::collections::BTreeMap;
 
 use ferrum_chain::{BlockCtx, build_coinbase_script_sig};
-use ferrum_consensus::{
-    ConsensusEngine, PowEngine, Target, compact_to_target, hash_meets_target,
-};
-use ferrum_script::sighash::SigHashType;
+use ferrum_consensus::{ConsensusEngine, PowEngine, Target, compact_to_target, hash_meets_target};
 use ferrum_storage::{MapView, header_hash, txid};
 use ferrum_types::{
     Amount, Block, BlockHash, BlockHeader, BlockSeal, ChainParams, Coin, CompactTarget, Hash32,
@@ -43,141 +40,9 @@ use crate::view::{SimHeaderView, median_time_past_of};
 /// instead of hanging a CI job.
 pub const MINING_ATTEMPT_BUDGET: u64 = 1 << 22;
 
-/// The default `sequence` the factory puts on an input.
-///
-/// One below `SEQUENCE_FINAL`, so `lock_time` and `OP_CHECKLOCKTIMEVERIFY` are
-/// both enforceable. A fully final sequence opts the input out of locktime
-/// entirely, which would silently disarm every timelock fixture.
-pub const DEFAULT_SEQUENCE: u32 = 0xffff_fffe;
+mod plan;
 
-/// An unspent output the factory knows how to spend.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SpendableCoin {
-    /// Where it lives.
-    pub out_point: OutPoint,
-    /// Its value, script, height and coinbase flag.
-    pub coin: Coin,
-    /// How it is locked, and therefore how it is unlocked.
-    pub lock: Lock,
-}
-
-impl SpendableCoin {
-    /// Whether this coin may be spent in a block at `height`.
-    #[must_use]
-    pub fn is_mature(&self, height: u64, maturity: u64) -> bool {
-        !self.coin.is_coinbase || height >= self.coin.height.saturating_add(maturity)
-    }
-}
-
-/// What one transaction should look like.
-#[derive(Clone, Debug)]
-pub struct TxPlan {
-    /// The coins to spend, in input order.
-    pub inputs: Vec<SpendableCoin>,
-    /// Where the money goes, in output order.
-    pub outputs: Vec<(Lock, Amount)>,
-    /// The transaction's `lock_time`.
-    pub lock_time: u32,
-    /// The `sequence` every input carries.
-    pub sequence: u32,
-    /// The transaction version.
-    pub version: u32,
-    /// Which sighash flavour every signature commits to.
-    pub sighash_type: SigHashType,
-}
-
-impl Default for TxPlan {
-    fn default() -> Self {
-        TxPlan {
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-            lock_time: 0,
-            sequence: DEFAULT_SEQUENCE,
-            version: 1,
-            sighash_type: SigHashType::ALL,
-        }
-    }
-}
-
-impl TxPlan {
-    /// Spend `inputs`, paying everything but `fee` to `to`.
-    #[must_use]
-    pub fn sweep(inputs: Vec<SpendableCoin>, to: Lock, fee: Amount) -> Self {
-        let total = inputs
-            .iter()
-            .fold(Amount::ZERO, |acc, c| acc.saturating_add(c.coin.value));
-        TxPlan { inputs, outputs: vec![(to, total.saturating_sub(fee))], ..TxPlan::default() }
-    }
-
-    /// The total value of the coins this plan spends.
-    #[must_use]
-    pub fn input_total(&self) -> Amount {
-        self.inputs.iter().fold(Amount::ZERO, |acc, c| acc.saturating_add(c.coin.value))
-    }
-}
-
-/// What one block should look like. Every `None` means "the obvious value".
-#[derive(Clone, Debug)]
-pub struct BlockPlan {
-    /// The non-coinbase transactions, in block order.
-    pub txs: Vec<Transaction>,
-    /// Override the coinbase entirely.
-    pub coinbase: Option<Transaction>,
-    /// Where the coinbase pays; defaults to key 0's P2PKH.
-    pub payout: Option<Lock>,
-    /// Extra grains claimed above `subsidy + fees`. `1` is the
-    /// overpay-by-one-grain attack.
-    pub coinbase_bonus: u64,
-    /// Grains the coinbase deliberately leaves unclaimed (burned).
-    pub coinbase_burn: u64,
-    /// Bytes appended to the BIP-34 height push in the coinbase `script_sig`.
-    pub coinbase_extra: Option<Vec<u8>>,
-    /// Override the header version.
-    pub version: Option<u32>,
-    /// Override the header timestamp.
-    pub timestamp_ms: Option<u64>,
-    /// Override the header target.
-    pub bits: Option<CompactTarget>,
-    /// Override the parent.
-    pub prev_hash: Option<BlockHash>,
-    /// Override the height the coinbase commits to.
-    pub height: Option<u64>,
-    /// Override the Merkle root, breaking the commitment on purpose.
-    pub merkle_root: Option<Hash32>,
-    /// Override the seal.
-    pub seal: Option<BlockSeal>,
-    /// Whether to grind a nonce that satisfies the target.
-    pub grind: bool,
-}
-
-impl Default for BlockPlan {
-    fn default() -> Self {
-        BlockPlan {
-            txs: Vec::new(),
-            coinbase: None,
-            payout: None,
-            coinbase_bonus: 0,
-            coinbase_burn: 0,
-            coinbase_extra: None,
-            version: None,
-            timestamp_ms: None,
-            bits: None,
-            prev_hash: None,
-            height: None,
-            merkle_root: None,
-            seal: None,
-            grind: true,
-        }
-    }
-}
-
-impl BlockPlan {
-    /// A plan carrying these transactions.
-    #[must_use]
-    pub fn with_txs(txs: Vec<Transaction>) -> Self {
-        BlockPlan { txs, ..BlockPlan::default() }
-    }
-}
+pub use crate::chain_builder::plan::{BlockPlan, DEFAULT_SEQUENCE, SpendableCoin, TxPlan};
 
 /// The deterministic chain factory.
 #[derive(Debug)]
@@ -306,7 +171,7 @@ impl ChainBuilder {
         Ok(header_hash(&self.tip_header()?))
     }
 
-    /// A [`HeaderView`] over the active chain.
+    /// A [`ferrum_consensus::HeaderView`] over the active chain.
     #[must_use]
     pub fn header_view(&self) -> SimHeaderView<'_> {
         SimHeaderView::new(&self.headers, &self.heights, &self.params)
@@ -504,7 +369,8 @@ impl ChainBuilder {
             fees = fees.saturating_add(inputs.saturating_sub(outputs));
             let id = txid(tx);
             for (vout, out) in tx.outputs.iter().enumerate() {
-                in_flight.insert(OutPoint::new(id, u32::try_from(vout).unwrap_or(u32::MAX)), out.value);
+                in_flight
+                    .insert(OutPoint::new(id, u32::try_from(vout).unwrap_or(u32::MAX)), out.value);
             }
         }
         fees
@@ -539,12 +405,8 @@ impl ChainBuilder {
                     .saturating_add(Amount::from_grains(plan.coinbase_bonus))
                     .saturating_sub(Amount::from_grains(plan.coinbase_burn));
                 let payout = plan.payout.clone().unwrap_or(Lock::P2pkh { key: 0 });
-                let cb = self.build_coinbase(
-                    height,
-                    value,
-                    &payout,
-                    plan.coinbase_extra.as_deref(),
-                )?;
+                let cb =
+                    self.build_coinbase(height, value, &payout, plan.coinbase_extra.as_deref())?;
                 self.remember_locks(&cb, &[(payout, value)]);
                 cb
             }
@@ -641,14 +503,8 @@ impl ChainBuilder {
                     is_coinbase,
                 };
                 self.utxo.insert(op, coin.clone());
-                if let Some(lock) = self.locks.get(&op) {
-                    if lock.is_spendable() {
-                        self.spendable.push(SpendableCoin {
-                            out_point: op,
-                            coin,
-                            lock: lock.clone(),
-                        });
-                    }
+                if let Some(lock) = self.locks.get(&op).filter(|l| l.is_spendable()) {
+                    self.spendable.push(SpendableCoin { out_point: op, coin, lock: lock.clone() });
                 }
             }
         }

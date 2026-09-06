@@ -1081,6 +1081,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "async-trait",
+ "borsh",
  "clap",
  "directories",
  "ferrum-chain",
@@ -1088,6 +1090,7 @@ dependencies = [
  "ferrum-crypto",
  "ferrum-mempool",
  "ferrum-node",
+ "ferrum-p2p",
  "ferrum-rpc",
  "ferrum-script",
  "ferrum-storage",
@@ -1096,14 +1099,19 @@ dependencies = [
  "hex",
  "humantime",
  "jsonrpsee",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "parking_lot",
  "predicates",
  "primitive-types",
+ "rand 0.8.8",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-subscriber",
@@ -1197,6 +1205,8 @@ name = "ferrum-node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "clap",
  "ferrum-chain",
  "ferrum-consensus",
  "ferrum-crypto",
@@ -1214,6 +1224,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "parking_lot",
  "primitive-types",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "tempfile",
@@ -1223,6 +1234,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

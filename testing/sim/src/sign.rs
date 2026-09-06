@@ -57,13 +57,27 @@ pub fn unlock(
         }
         Lock::P2pk { key } => {
             push_signature(
-                &mut out, tx, input_index, &script_code, input_value, chain_id, keys, *key,
+                &mut out,
+                tx,
+                input_index,
+                &script_code,
+                input_value,
+                chain_id,
+                keys,
+                *key,
                 sighash_type,
             )?;
         }
         Lock::P2pkh { key } | Lock::CltvP2pkh { key, .. } => {
             push_signature(
-                &mut out, tx, input_index, &script_code, input_value, chain_id, keys, *key,
+                &mut out,
+                tx,
+                input_index,
+                &script_code,
+                input_value,
+                chain_id,
+                keys,
+                *key,
                 sighash_type,
             )?;
             push_bytes(&mut out, keys.public(*key)?.as_bytes())?;
@@ -71,7 +85,14 @@ pub fn unlock(
         Lock::Multisig { .. } => {
             for key in lock.signing_keys() {
                 push_signature(
-                    &mut out, tx, input_index, &script_code, input_value, chain_id, keys, key,
+                    &mut out,
+                    tx,
+                    input_index,
+                    &script_code,
+                    input_value,
+                    chain_id,
+                    keys,
+                    key,
                     sighash_type,
                 )?;
             }
@@ -79,7 +100,14 @@ pub fn unlock(
         Lock::P2shMultisig { .. } => {
             for key in lock.signing_keys() {
                 push_signature(
-                    &mut out, tx, input_index, &script_code, input_value, chain_id, keys, key,
+                    &mut out,
+                    tx,
+                    input_index,
+                    &script_code,
+                    input_value,
+                    chain_id,
+                    keys,
+                    key,
                     sighash_type,
                 )?;
             }
@@ -102,9 +130,16 @@ pub fn unlock(
 
 /// The 65-byte signature one key makes over this input.
 ///
+/// The argument list is long because the sighash preimage commits to all of
+/// it — the chain id, the whole transaction, the input index, the value being
+/// spent, the script code and the sighash flavour (CONTRACT §5.5). Bundling
+/// them into a struct would hide the fact that every one of them changes the
+/// digest.
+///
 /// # Errors
 ///
 /// As [`unlock`].
+#[allow(clippy::too_many_arguments)]
 pub fn signature_for(
     tx: &Transaction,
     input_index: usize,
@@ -185,16 +220,8 @@ mod tests {
             outputs: vec![TxOut::new(Amount::from_grains(1), Script::new(vec![0x51]))],
             lock_time,
         };
-        let script_sig = unlock(
-            &tx,
-            0,
-            lock,
-            value,
-            ChainId::DEVNET,
-            keys,
-            SigHashType::ALL,
-        )
-        .unwrap();
+        let script_sig =
+            unlock(&tx, 0, lock, value, ChainId::DEVNET, keys, SigHashType::ALL).unwrap();
         tx.inputs[0].script_sig = script_sig;
         let ctx = ExecCtx {
             chain_id: ChainId::DEVNET,
@@ -225,13 +252,7 @@ mod tests {
         ));
         // CLTV needs a non-final sequence and a transaction locktime that has
         // reached the script's.
-        assert!(fixture(
-            &Lock::CltvP2pkh { key: 2, locktime: 5 },
-            &keys,
-            value,
-            5,
-            0xffff_fffe
-        ));
+        assert!(fixture(&Lock::CltvP2pkh { key: 2, locktime: 5 }, &keys, value, 5, 0xffff_fffe));
     }
 
     #[test]
@@ -291,10 +312,7 @@ mod tests {
         };
         tx.inputs[0].script_sig =
             unlock(&tx, 0, &lock, value, ChainId::TESTNET, &keys, SigHashType::ALL).unwrap();
-        let ctx = ExecCtx {
-            input_value: value,
-            ..ExecCtx::new(ChainId::MAINNET, &tx, 0)
-        };
+        let ctx = ExecCtx { input_value: value, ..ExecCtx::new(ChainId::MAINNET, &tx, 0) };
         assert!(verify(&tx.inputs[0].script_sig, &script_pubkey, &ctx).is_err());
     }
 }

@@ -42,8 +42,9 @@ async fn send(app: &Router, mut request: Request<Body>) -> (StatusCode, Vec<u8>)
 async fn get(app: &Router, path: &str) -> (StatusCode, Value) {
     let request = Request::builder().uri(path).body(Body::empty()).unwrap();
     let (status, body) = send(app, request).await;
-    let json = serde_json::from_slice(&body)
-        .unwrap_or_else(|e| panic!("{path} returned non-JSON ({e}): {:?}", String::from_utf8_lossy(&body)));
+    let json = serde_json::from_slice(&body).unwrap_or_else(|e| {
+        panic!("{path} returned non-JSON ({e}): {:?}", String::from_utf8_lossy(&body))
+    });
     (status, json)
 }
 
@@ -128,11 +129,7 @@ async fn recent_transactions_carry_string_amounts() {
 #[tokio::test]
 async fn a_mempool_transaction_shows_as_pending_in_stats() {
     let f = Fixture::build(1, false);
-    f.mempool.insert(
-        ferrum_types::Transaction::empty(),
-        ferrum_types::Amount::from_grains(500),
-        1,
-    );
+    f.mempool.insert(ferrum_types::Transaction::empty(), ferrum_types::Amount::from_grains(500), 1);
     let (_, json) = get(&app(f.context()), "/api/stats").await;
     assert_eq!(json["mempool_size"], 1);
     let txs = json["recent_txs"].as_array().unwrap();
@@ -155,7 +152,8 @@ async fn a_block_can_be_fetched_by_height_or_by_hash() {
 async fn a_block_carries_the_header_fields_the_page_reads() {
     let f = Fixture::build(2, false);
     let (_, json) = get(&app(f.context()), "/api/block/1").await;
-    for field in ["hash", "height", "size", "engine", "total_work", "confirmations", "header", "txs"]
+    for field in
+        ["hash", "height", "size", "engine", "total_work", "confirmations", "header", "txs"]
     {
         assert!(json.get(field).is_some(), "/api/block is missing `{field}`");
     }
@@ -249,7 +247,7 @@ async fn transaction_inputs_resolve_their_funding_output() {
 #[tokio::test]
 async fn a_coinbase_input_is_marked_rather_than_resolved() {
     let f = Fixture::build(1, false);
-    let block = f.chain.store.get_block(&f.blocks[0]).unwrap().unwrap();
+    let block = f.block(&f.blocks[0]);
     let id = ferrum_storage::txid(&block.txs[0]);
     let (_, json) = get(&app(f.context()), &format!("/api/tx/{}", id.to_hex())).await;
     let inputs = json["inputs"].as_array().unwrap();
@@ -263,7 +261,7 @@ async fn a_coinbase_input_is_marked_rather_than_resolved() {
 async fn an_unspent_output_reports_no_spender_and_a_spent_one_names_it() {
     let f = Fixture::build(2, true);
     // The coinbase of block 1 was spent by the fixture's transaction.
-    let block = f.chain.store.get_block(&f.blocks[0]).unwrap().unwrap();
+    let block = f.block(&f.blocks[0]);
     let spent_id = ferrum_storage::txid(&block.txs[0]);
     let (_, json) = get(&app(f.context()), &format!("/api/tx/{}", spent_id.to_hex())).await;
     let outputs = json["outputs"].as_array().unwrap();
@@ -304,7 +302,8 @@ async fn the_transaction_page_needs_the_index_and_says_so() {
 #[tokio::test]
 async fn an_address_carries_every_field_the_page_reads() {
     let f = Fixture::build(3, false);
-    let (status, json) = get(&app(f.context()), &format!("/api/address/{}", f.miner.encode())).await;
+    let (status, json) =
+        get(&app(f.context()), &format!("/api/address/{}", f.miner.encode())).await;
     assert_eq!(status, StatusCode::OK);
     for field in [
         "address",
@@ -386,8 +385,7 @@ async fn search_resolves_a_height_a_hash_a_txid_and_an_address() {
     let (_, by_hash) = get(&a, &format!("/api/search?q={}", f.blocks[0].to_hex())).await;
     assert_eq!(by_hash["kind"], "block");
 
-    let (_, by_txid) =
-        get(&a, &format!("/api/search?q={}", f.spend_txid.unwrap().to_hex())).await;
+    let (_, by_txid) = get(&a, &format!("/api/search?q={}", f.spend_txid.unwrap().to_hex())).await;
     assert_eq!(by_txid["kind"], "tx");
 
     let (_, by_address) = get(&a, &format!("/api/search?q={}", f.miner.encode())).await;

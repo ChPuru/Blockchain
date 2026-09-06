@@ -20,15 +20,13 @@
 //!
 //! The same three rules apply on the input side, so a hand-built pre-state
 //! holding two `MAX_MONEY` coins produces
-//! [`ValidationError::InputSumOverflow`] rather than a wrapped fee.
+//! [`ferrum_chain::ValidationError::InputSumOverflow`] rather than a wrapped fee.
 //!
 //! **Red:** each of the four shapes above is rejected with its own variant.
 //! **Green:** a transaction whose sums are large but legal is accepted.
 
 use ferrum_storage::MapView;
-use ferrum_types::{
-    Amount, Coin, OutPoint, Script, Transaction, TxIn, TxOut, Txid,
-};
+use ferrum_types::{Amount, Coin, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
 
 use crate::chain_builder::{BlockPlan, ChainBuilder};
 use crate::error::SimError;
@@ -54,12 +52,7 @@ pub fn huge_pre_state(seed: u8, count: u32, value: Amount) -> (MapView, Vec<OutP
         let op = OutPoint::new(txid, vout);
         view.insert(
             op,
-            Coin {
-                value,
-                script_pubkey: anyone_script(),
-                height: 0,
-                is_coinbase: false,
-            },
+            Coin { value, script_pubkey: anyone_script(), height: 0, is_coinbase: false },
         );
         ops.push(op);
     }
@@ -72,10 +65,7 @@ pub fn huge_pre_state(seed: u8, count: u32, value: Amount) -> (MapView, Vec<OutP
 pub fn unsigned_spend(inputs: &[OutPoint], outputs: &[Amount]) -> Transaction {
     Transaction {
         version: 1,
-        inputs: inputs
-            .iter()
-            .map(|op| TxIn::new(*op, Script::EMPTY))
-            .collect(),
+        inputs: inputs.iter().map(|op| TxIn::new(*op, Script::EMPTY)).collect(),
         outputs: outputs.iter().map(|v| TxOut::new(*v, anyone_script())).collect(),
         lock_time: 0,
     }
@@ -224,8 +214,7 @@ mod tests {
         let a = unsigned_spend(&ops[0..1], &[Amount::from_grains(1)]);
         let b = unsigned_spend(&ops[1..2], &[Amount::from_grains(1)]);
         let ctx = c.next_ctx().unwrap();
-        let block =
-            c.build_block(&BlockPlan { txs: vec![a, b], ..BlockPlan::default() }).unwrap();
+        let block = c.build_block(&BlockPlan { txs: vec![a, b], ..BlockPlan::default() }).unwrap();
         // Each transaction alone pays a fee of nearly MAX_MONEY, so the block
         // total cannot be valid money.
         assert!(matches!(

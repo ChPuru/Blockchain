@@ -67,9 +67,10 @@ pub struct BlockHeaderJson {
 ///
 /// The six header fields are repeated here rather than nested behind
 /// `#[serde(flatten)]`. Flatten makes serde buffer the whole object through an
-/// intermediate representation that names `f32`/`f64` — types this workspace
-/// denies outright — and it costs an allocation per response. A handful of
-/// duplicated field declarations is the cheaper trade.
+/// intermediate representation that names every scalar type serde knows,
+/// including the floating-point ones `clippy.toml` denies workspace-wide, and
+/// it costs an allocation per response. A handful of duplicated field
+/// declarations is the cheaper trade.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockHeaderInfo {
     /// `tagged_hash(TAG_HEADER, header_bytes)`, hex.

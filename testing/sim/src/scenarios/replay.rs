@@ -15,7 +15,7 @@
 //! which *pushes* false rather than aborting, so the clean-stack rule is what
 //! turns it into a rejection: exactly one element remains and it is false,
 //! which is [`ferrum_script::ScriptError::EvalFalse`]. Inside a block that
-//! surfaces as [`ValidationError::ScriptVerification`] naming the transaction
+//! surfaces as [`ferrum_chain::ValidationError::ScriptVerification`] naming the transaction
 //! and the input.
 //!
 //! **Red:** a signature made under one `chain_id` fails under another, both in
@@ -185,10 +185,7 @@ mod tests {
         tx.inputs[0].script_sig =
             unlock(&tx, 0, &lock, value, ChainId::DEVNET, &keys, SigHashType::ALL).unwrap();
         let script_pubkey = lock.script_pubkey(&keys).unwrap();
-        let ctx = ExecCtx {
-            input_value: value,
-            ..ExecCtx::new(ChainId::MAINNET, &tx, 0)
-        };
+        let ctx = ExecCtx { input_value: value, ..ExecCtx::new(ChainId::MAINNET, &tx, 0) };
         assert!(verify(&tx.inputs[0].script_sig, &script_pubkey, &ctx).is_err());
     }
 
@@ -203,10 +200,7 @@ mod tests {
         tx.inputs[0].script_sig =
             unlock(&tx, 0, &lock, value, ChainId::TESTNET, &keys, SigHashType::ALL).unwrap();
         let script_pubkey = lock.script_pubkey(&keys).unwrap();
-        let ctx = ExecCtx {
-            input_value: value,
-            ..ExecCtx::new(ChainId::TESTNET, &tx, 0)
-        };
+        let ctx = ExecCtx { input_value: value, ..ExecCtx::new(ChainId::TESTNET, &tx, 0) };
         assert!(verify(&tx.inputs[0].script_sig, &script_pubkey, &ctx).is_ok());
     }
 
@@ -215,9 +209,15 @@ mod tests {
         let keys = KeyRing::deterministic(DEFAULT_KEYRING_SIZE).unwrap();
         let lock = Lock::P2pkh { key: 6 };
         let tx = one_input_tx(Amount::from_grains(10));
-        let (a, b) =
-            preimages_under(&tx, &lock, &keys, Amount::from_grains(20), ChainId::MAINNET, ChainId::DEVNET)
-                .unwrap();
+        let (a, b) = preimages_under(
+            &tx,
+            &lock,
+            &keys,
+            Amount::from_grains(20),
+            ChainId::MAINNET,
+            ChainId::DEVNET,
+        )
+        .unwrap();
         assert_eq!(a.len(), b.len());
         assert_eq!(&a[..4], &ChainId::MAINNET.to_u32().to_le_bytes());
         assert_eq!(&b[..4], &ChainId::DEVNET.to_u32().to_le_bytes());
@@ -230,7 +230,11 @@ mod tests {
         let height = chain.height() + 1;
         let coin = chain.take_mature(1, height).pop().unwrap();
         let tx = chain
-            .build_tx(&TxPlan::sweep(vec![coin], Lock::P2pkh { key: 7 }, Amount::from_grains(1_000)))
+            .build_tx(&TxPlan::sweep(
+                vec![coin],
+                Lock::P2pkh { key: 7 },
+                Amount::from_grains(1_000),
+            ))
             .unwrap();
         let ctx = chain.next_ctx().unwrap();
         let pre = chain.state_view();

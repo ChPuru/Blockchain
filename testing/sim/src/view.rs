@@ -77,11 +77,7 @@ impl HeaderView for SimHeaderView<'_> {
 
     fn tip(&self) -> (BlockHash, u64) {
         let height = u64::try_from(self.headers.len().saturating_sub(1)).unwrap_or(0);
-        let hash = self
-            .headers
-            .last()
-            .map(ferrum_storage::header_hash)
-            .unwrap_or(BlockHash::ZERO);
+        let hash = self.headers.last().map(ferrum_storage::header_hash).unwrap_or(BlockHash::ZERO);
         (hash, height)
     }
 

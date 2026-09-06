@@ -292,9 +292,7 @@ mod tests {
             .skip(f.fork_height as usize + 1)
             .flat_map(|b| b.txs.iter().skip(1))
             .map(ferrum_storage::txid)
-            .filter(|id| {
-                f.node.coin_at(&ferrum_types::OutPoint::new(*id, 0)).unwrap().is_some()
-            })
+            .filter(|id| f.node.coin_at(&ferrum_types::OutPoint::new(*id, 0)).unwrap().is_some())
             .collect();
         assert!(live.len() > 5, "the fixture must create real payment outputs, saw {}", live.len());
 
@@ -341,8 +339,7 @@ mod tests {
 
         let prefix: Vec<Block> =
             f.honest.iter().take(f.fork_height as usize + 1).cloned().collect();
-        let fresh =
-            replay_into_fresh_node(short_maturity_params(), &prefix, &f.branch).unwrap();
+        let fresh = replay_into_fresh_node(short_maturity_params(), &prefix, &f.branch).unwrap();
 
         assert_eq!(f.node.tip(), fresh.tip(), "same tip");
         assert_eq!(f.node.state_root().unwrap(), fresh.state_root().unwrap(), "same state root");

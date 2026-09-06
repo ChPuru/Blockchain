@@ -518,9 +518,8 @@ mod tests {
     #[test]
     fn the_tracking_table_is_bounded() {
         let clock = Arc::new(ManualClock::default());
-        let config = FaucetConfig::default()
-            .with_ip_limit(60_000, 1_000)
-            .with_address_window_ms(600_000);
+        let config =
+            FaucetConfig::default().with_ip_limit(60_000, 1_000).with_address_window_ms(600_000);
         let config = FaucetConfig { max_tracked: 4, ..config };
         let f = Faucet::with_clock(
             config,
@@ -541,10 +540,7 @@ mod tests {
 
     #[test]
     fn wallet_shortfalls_become_drained_not_failed() {
-        let err = map_wallet_error(WalletError::InsufficientFunds {
-            available: 1,
-            required: 10,
-        });
+        let err = map_wallet_error(WalletError::InsufficientFunds { available: 1, required: 10 });
         assert_eq!(err.code(), RpcErrorCode::FaucetDrained);
         assert!(err.detail().contains('1'));
     }

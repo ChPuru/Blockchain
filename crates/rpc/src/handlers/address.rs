@@ -126,8 +126,7 @@ pub fn address_report(
             received = received
                 .checked_add(output.value)
                 .ok_or_else(|| RpcError::overflow("address credits"))?;
-            let out_point =
-                OutPoint::new(found.txid, u32::try_from(vout).unwrap_or(u32::MAX));
+            let out_point = OutPoint::new(found.txid, u32::try_from(vout).unwrap_or(u32::MAX));
             if let Some(coin) = chain.coin(&out_point)? {
                 utxos.insert(out_point, coin);
             }

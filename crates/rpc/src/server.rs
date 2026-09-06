@@ -19,10 +19,10 @@ use std::net::SocketAddr;
 
 use jsonrpsee::server::{ServerBuilder, ServerHandle};
 
+use crate::api::FerrumRpcServer;
 use crate::context::NodeContext;
 use crate::error::{RpcError, RpcErrorCode};
 use crate::handlers::FerrumRpcImpl;
-use crate::api::FerrumRpcServer;
 use crate::rest::{RestConfig, RestState, router};
 
 /// Default JSON-RPC bind address (CONTRACT §13.1).
@@ -114,9 +114,7 @@ impl ExplorerServerConfig {
 /// fail; the fallback exists so that a typo in a future edit degrades to a
 /// working loopback bind instead of a panic at startup.
 fn default_socket_addr(text: &str, port: u16) -> SocketAddr {
-    text.parse().unwrap_or_else(|_| {
-        SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))
-    })
+    text.parse().unwrap_or_else(|_| SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)))
 }
 
 /// A running JSON-RPC listener.
@@ -256,16 +254,13 @@ pub async fn spawn_explorer_server(
     let app = router(RestState::new(ctx, config.rest));
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(async move {
-        let served = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            // A dropped sender is a shutdown too: it means the handle went
-            // away, and a listener nobody can stop is a leak.
-            let _ = rx.await;
-        })
-        .await;
+        let served = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .with_graceful_shutdown(async move {
+                // A dropped sender is a shutdown too: it means the handle went
+                // away, and a listener nobody can stop is a leak.
+                let _ = rx.await;
+            })
+            .await;
         if let Err(e) = served {
             tracing::error!(error = %e, "explorer listener stopped with an error");
         }

@@ -79,12 +79,11 @@ fn listunspent_names_every_outpoint_with_a_string_amount() {
 fn heights_in_listunspent_match_the_blocks_that_created_the_coins() {
     let f = Fixture::build(3, false);
     let chain = f.provider();
-    let mut heights: Vec<u64> =
-        list_unspent(&*chain, &StubMempool::new(), &f.miner.encode())
-            .unwrap()
-            .iter()
-            .map(|r| r.height)
-            .collect();
+    let mut heights: Vec<u64> = list_unspent(&*chain, &StubMempool::new(), &f.miner.encode())
+        .unwrap()
+        .iter()
+        .map(|r| r.height)
+        .collect();
     heights.sort_unstable();
     assert_eq!(heights, vec![1, 2, 3]);
 }
@@ -123,8 +122,7 @@ fn history_and_balance_are_computed_from_the_same_key() {
     let report = address_report(&*chain, &StubMempool::new(), &f.miner.encode()).unwrap();
     assert_eq!(report.key, f.miner.payload.as_bytes().to_vec());
     let credited: i128 = report.history.iter().map(|h| h.delta).sum();
-    let held = i128::from(report.confirmed.to_grains())
-        + i128::from(report.immature.to_grains());
+    let held = i128::from(report.confirmed.to_grains()) + i128::from(report.immature.to_grains());
     assert_eq!(credited, held, "history and balance disagree");
 }
 
@@ -172,8 +170,7 @@ fn the_genesis_burn_output_belongs_to_no_address() {
     // Genesis pays one provably unspendable OP_RETURN output. It is in the
     // UTXO set, so it must not be attributed to anyone.
     let f = Fixture::build(1, false);
-    let genesis_hash = f.chain.store.hash_at_height(0).unwrap().unwrap();
-    let genesis = f.chain.store.get_block(&genesis_hash).unwrap().unwrap();
+    let genesis = f.block_at(0);
     let script = &genesis.txs[0].outputs[0].script_pubkey;
     assert_eq!(crate::handlers::convert::script_type_name(script), "op_return");
     assert_eq!(
