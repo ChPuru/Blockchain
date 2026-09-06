@@ -1,0 +1,97 @@
+# A four-node Ferrum devnet.
+#
+#   docker compose -f devnet/docker-compose.yml up --build
+#   docker compose -f devnet/docker-compose.yml exec node1 chain-cli chain info
+#
+# The bash scripts beside this file (up.sh / partition.sh / heal.sh) drive local
+# binaries instead and are faster to iterate on. This file is for a clean-room
+# reproduction and for anyone who would rather not install Rust.
+
+name: ferrum-devnet
+
+x-node: &node
+  build:
+    context: ..
+    dockerfile: devnet/Dockerfile
+  restart: unless-stopped
+  networks: [ferrum]
+  stop_grace_period: 20s          # let the node flush its store and write the tip last
+  healthcheck:
+    test: ["CMD", "curl", "-sf", "-H", "content-type: application/json",
+           "-d", '{"jsonrpc":"2.0","id":1,"method":"getblockchaininfo","params":[]}',
+           "http://127.0.0.1:8645"]
+    interval: 20s
+    timeout: 5s
+    retries: 3
+    start_period: 30s
+  # A devnet node needs no privileges and nothing writable outside its datadir.
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  read_only: true
+  tmpfs: [/tmp]
+
+x-args: &args
+  - --network=devnet
+  - --datadir=/var/lib/ferrum
+  - --rpc-listen=0.0.0.0:8645
+  - --p2p-listen=/ip4/0.0.0.0/tcp/8655
+  - --explorer-listen=0.0.0.0:8665
+  - --metrics-listen=0.0.0.0:9100
+  - --index
+
+services:
+  node1:
+    <<: *node
+    container_name: ferrum-node1
+    volumes: [node1-data:/var/lib/ferrum]
+    ports: ["8645:8645", "8665:8665", "9100:9100"]
+    command:
+      - *args
+      - --mine
+      - --peer=/dns4/node2/tcp/8655
+      - --peer=/dns4/node3/tcp/8655
+      - --peer=/dns4/node4/tcp/8655
+
+  node2:
+    <<: *node
+    container_name: ferrum-node2
+    volumes: [node2-data:/var/lib/ferrum]
+    ports: ["8646:8645", "8666:8665"]
+    command:
+      - *args
+      - --mine
+      - --peer=/dns4/node1/tcp/8655
+      - --peer=/dns4/node3/tcp/8655
+      - --peer=/dns4/node4/tcp/8655
+
+  node3:
+    <<: *node
+    container_name: ferrum-node3
+    volumes: [node3-data:/var/lib/ferrum]
+    ports: ["8647:8645", "8667:8665"]
+    command:
+      - *args
+      - --peer=/dns4/node1/tcp/8655
+      - --peer=/dns4/node2/tcp/8655
+      - --peer=/dns4/node4/tcp/8655
+
+  node4:
+    <<: *node
+    container_name: ferrum-node4
+    volumes: [node4-data:/var/lib/ferrum]
+    ports: ["8648:8645", "8668:8665"]
+    command:
+      - *args
+      - --peer=/dns4/node1/tcp/8655
+      - --peer=/dns4/node2/tcp/8655
+      - --peer=/dns4/node3/tcp/8655
+
+networks:
+  ferrum:
+    driver: bridge
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:

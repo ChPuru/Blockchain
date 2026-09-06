@@ -66,8 +66,8 @@ list.
 bash devnet/up.sh
 ```
 
-Four nodes on `127.0.0.1:8646..8649`, RPC on `8645..8648`, and the explorer on
-<http://localhost:8647>. All four share a genesis and a static peer list.
+Four nodes: RPC on `8645..8648`, p2p on `8655..8658`, metrics on `9100..9103`, and the explorer on
+<http://127.0.0.1:8665>. All four share a genesis and a static peer list.
 
 ```sh
 bash devnet/status.sh          # every node's tip hash, height and cumulative work
@@ -111,15 +111,15 @@ network  = "devnet"            # mainnet | testnet | devnet
 datadir  = "./data"
 
 [p2p]
-listen   = "/ip4/0.0.0.0/tcp/8646"
-peers    = ["/ip4/10.0.0.2/tcp/8646", "/ip4/10.0.0.3/tcp/8646"]
+listen   = "/ip4/0.0.0.0/tcp/8655"
+peers    = ["/ip4/10.0.0.2/tcp/8655", "/ip4/10.0.0.3/tcp/8655"]
 
 [rpc]
 listen   = "127.0.0.1:8645"    # bind to localhost unless you mean it - see §5
 ws       = true
 
 [explorer]
-listen   = "0.0.0.0:8647"
+listen   = "0.0.0.0:8665"
 faucet   = true
 faucet_amount = "1.0"
 
@@ -216,8 +216,8 @@ journalctl -u ferrum -f
 
 | Port | Purpose | Expose? |
 |---|---|---|
-| 8646 | p2p | **yes** — peers need to reach you |
-| 8647 | explorer + faucet | yes, behind a reverse proxy |
+| 8655 | p2p | **yes** — peers need to reach you |
+| 8665 | explorer + faucet | yes, behind a reverse proxy |
 | 8645 | JSON-RPC | **localhost only**, unless proxied |
 | 9100 | Prometheus metrics | **localhost only** |
 
@@ -227,7 +227,7 @@ behind nginx or Cloudflare with rate limiting, or leave it on loopback.
 
 ```nginx
 location /rpc  { proxy_pass http://127.0.0.1:8645; limit_req zone=rpc burst=20 nodelay; }
-location /     { proxy_pass http://127.0.0.1:8647; }
+location /     { proxy_pass http://127.0.0.1:8665; }
 ```
 
 ### The check that actually matters
@@ -236,7 +236,7 @@ Weekly, from a machine that has never run a node:
 
 ```sh
 ./target/release/chaind --network mainnet --datadir /tmp/fresh \
-    --peer /dns4/seed1.example.com/tcp/8646
+    --peer /dns4/seed1.example.com/tcp/8655
 ```
 
 It must reach the current tip from genesis with no manual steps, following only the published

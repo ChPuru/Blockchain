@@ -936,6 +936,53 @@ chain-cli  wallet   new | restore | address | balance | send | list-unspent | du
 Config file is TOML, and every field has a CLI override. Precedence:
 **CLI flag > env var (`FERRUM_*`) > config file > network default.**
 
+### 13.1 Exact CLI surface the devnet scripts depend on
+
+`devnet/*.sh` and `.github/workflows/ci.yml` already call these. They are part of the contract, not
+suggestions — if the CLI does not provide them exactly, the end-to-end test cannot run.
+
+**`chaind`**
+
+| Flag | Meaning |
+|---|---|
+| `--network <mainnet\|testnet\|devnet>` | selects `ChainParams` |
+| `--datadir <DIR>` | store, keystore and node key live here |
+| `--rpc-listen <ip:port>` | JSON-RPC, default `127.0.0.1:8645` |
+| `--p2p-listen <multiaddr>` | default `/ip4/0.0.0.0/tcp/8655` |
+| `--explorer-listen <ip:port>` | REST + static page, default `127.0.0.1:8665` |
+| `--metrics-listen <ip:port>` | Prometheus, default off |
+| `--peer <multiaddr>` | repeatable, static peer list |
+| `--mine` | start the miner |
+| `--mine-address <addr>` | **optional.** When absent, mine to an address derived from the node key in `<datadir>/node.key`, generating it on first run. A devnet must be startable with no wallet setup. |
+| `--index` | maintain the tx/address reverse index |
+| `--consensus <pow\|bft>` | force an engine, overriding the height-based router |
+| `--consensus-config <FILE>` | TOML with `bft_activation_height` and `bft_validators` |
+| `--validator-key <FILE>` | BFT signing key |
+| `--log-format <text\|json>` | |
+| `--config <FILE>` | TOML, lowest precedence after network defaults |
+
+Ports: node *i* of a devnet uses RPC `8645+i-1`, p2p `8655+i-1`, explorer `8665+i-1`,
+metrics `9100+i-1`.
+
+**`chain-cli`** takes two global flags before the subcommand:
+`--datadir <DIR>` and `--rpc <url>` (default `http://127.0.0.1:8645`).
+
+Subcommands whose exact output shape is depended upon — each prints the bare value as the **last
+line of stdout**, so `| tail -1` works, with `--json` available for structured output:
+
+| Command | Last line of stdout |
+|---|---|
+| `wallet new [--output FILE]` | the new address (the mnemonic goes to stderr, or to `--output`) |
+| `wallet address` | an address |
+| `wallet balance` | confirmed balance in FRM |
+| `wallet send --to <addr> --amount <frm> [--fee-rate <n>]` | the txid |
+| `wallet dump-pubkey --key <FILE>` | 64-hex x-only public key |
+| `chain info` | human summary; `--json` gives `getblockchaininfo` verbatim |
+| `genesis mine --network <n> --message <s> --timestamp <ms>` | `nonce=<n> hash=<hex>` |
+
+**Logging:** a completed reorg must log a line matching `/reorg|disconnect|rolled back|new tip/i`,
+because `devnet/heal.sh` greps for it to show what the losing node did.
+
 Node structure: a single `tokio` runtime; `p2p`, `rpc`, `miner`, `explorer` and `metrics` each own a
 task; all communicate over bounded channels; a `CancellationToken` gives a clean shutdown on
 SIGINT/SIGTERM, and the store is flushed before exit.
