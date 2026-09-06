@@ -4,9 +4,13 @@
 //! supply, and they deserve to be read together: resolve, mature, pay for what
 //! you spend, and claim no more than the subsidy plus the fees.
 
+use ferrum_crypto::{SecretKey, hash160};
+use ferrum_script::ScriptError;
+use ferrum_script::opcode::encode_push;
+use ferrum_script::sighash::{SigHashType, encode_signature, signature_hash};
 use ferrum_storage::{EmptyView, header_hash};
 use ferrum_types::{
-    Amount, Block, BlockHash, BlockHeader, ChainParams, Coin, Hash32, OutPoint, Script,
+    Amount, Block, BlockHash, BlockHeader, ChainId, ChainParams, Coin, Hash32, OutPoint, Script,
     Transaction, Txid,
 };
 
@@ -15,7 +19,7 @@ use crate::ctx::BlockCtx;
 use crate::error::ValidationError;
 use crate::tests::support::{
     any_spend_script, block_of, burn_script, coin, coinbase, coinbase_with_script_sig, ctx_at,
-    devnet, map_view, out_point, parent_header, spend,
+    devnet, devnet_with, map_view, out_point, parent_header, spend,
 };
 
 const PARENT_MS: u64 = 1_700_000_000_000;
@@ -309,5 +313,98 @@ fn a_non_coinbase_output_colliding_with_the_utxo_set_is_rejected() {
     assert_eq!(
         apply_block(&pre, &block, &ctx),
         Err(ValidationError::DuplicateOutPoint { out_point: collision })
+    );
+}
+
+// ------------------------------------------ cross-chain signature replay
+
+/// A fixed signing key. Any 32 bytes below the curve order will do.
+fn replay_key() -> SecretKey {
+    SecretKey::from_bytes(&[7u8; 32]).expect("a fixed test key is on the curve")
+}
+
+/// The `script_sig` satisfying a P2PKH output: `<65B sig> <32B x-only key>`.
+///
+/// Signs input 0 under `chain_id`, which is the only thing the two calls in
+/// the replay test below disagree about.
+fn p2pkh_script_sig(
+    key: &SecretKey,
+    tx: &Transaction,
+    script_code: &Script,
+    value: Amount,
+    chain_id: ChainId,
+) -> Script {
+    let digest = signature_hash(tx, 0, script_code.as_bytes(), value, chain_id, SigHashType::ALL)
+        .expect("a single-input SIGHASH_ALL preimage always builds");
+    let signature = encode_signature(&key.sign_deterministic(&digest), SigHashType::ALL);
+    let mut bytes = encode_push(&signature).expect("65 bytes is a direct push");
+    bytes.extend_from_slice(
+        &encode_push(key.public_key().as_bytes()).expect("32 bytes is a direct push"),
+    );
+    Script::new(bytes)
+}
+
+/// A block spending one P2PKH coin, signed for `signed_for`, plus the
+/// pre-state it spends from.
+fn replay_fixture(params: &ChainParams, signed_for: ChainId) -> (ferrum_storage::MapView, Block) {
+    let key = replay_key();
+    let script_pubkey = ferrum_script::templates::p2pkh(&hash160(key.public_key().as_bytes()));
+    let funded = OutPoint::new(Txid(Hash32::from_bytes([31; 32])), 0);
+    let value = amount(1_000);
+    let pre = map_view(&[(
+        funded,
+        Coin { value, script_pubkey: script_pubkey.clone(), height: 0, is_coinbase: false },
+    )]);
+
+    let mut tx = spend(&[funded], &[(amount(900), any_spend_script())]);
+    tx.inputs[0].script_sig = p2pkh_script_sig(&key, &tx, &script_pubkey, value, signed_for);
+
+    let reward = params.block_subsidy(1).checked_add(amount(100)).expect("subsidy plus fee fits");
+    let (_, prev, _) = scene(params);
+    (pre, block_with(vec![coinbase(1, reward, b"n"), tx], prev, params))
+}
+
+#[test]
+fn a_signature_made_under_one_chain_id_is_rejected_under_another() {
+    // The seam this guards is `apply_block` filling `ExecCtx::chain_id` from
+    // `ctx.params.chain_id`. `ferrum-script` already proves the sighash
+    // preimage commits to the chain id; only a block-level test proves
+    // `ferrum-chain` passes the *running network's* id through rather than a
+    // constant, which is what stops a testnet signature being replayed on
+    // mainnet.
+    let signing = devnet();
+    let replay = devnet_with(|p| p.chain_id = ChainId::MAINNET);
+    assert_ne!(signing.chain_id, replay.chain_id, "the two networks must differ");
+
+    let (pre, block) = replay_fixture(&signing, signing.chain_id);
+
+    let (_, _, own_ctx) = scene(&signing);
+    apply_block(&pre, &block, &own_ctx).expect("the signature is valid on its own chain");
+
+    let (_, _, foreign_ctx) = scene(&replay);
+    assert_eq!(
+        apply_block(&pre, &block, &foreign_ctx),
+        Err(ValidationError::ScriptVerification {
+            tx_index: 1,
+            input_index: 0,
+            source: ScriptError::EvalFalse,
+        }),
+        "a signature bound to chain 3 must not spend on chain 1"
+    );
+}
+
+#[test]
+fn a_signature_made_for_the_wrong_chain_never_validates_anywhere() {
+    // The mirror image: sign for mainnet, then try to spend on devnet.
+    let devnet_params = devnet();
+    let (pre, block) = replay_fixture(&devnet_params, ChainId::MAINNET);
+    let (_, _, ctx) = scene(&devnet_params);
+    assert_eq!(
+        apply_block(&pre, &block, &ctx),
+        Err(ValidationError::ScriptVerification {
+            tx_index: 1,
+            input_index: 0,
+            source: ScriptError::EvalFalse,
+        })
     );
 }

@@ -1179,6 +1179,7 @@ name = "ferrum-mempool"
 version = "0.1.0"
 dependencies = [
  "ferrum-chain",
+ "ferrum-consensus",
  "ferrum-crypto",
  "ferrum-script",
  "ferrum-storage",
@@ -1248,16 +1249,17 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "borsh",
  "ferrum-chain",
  "ferrum-consensus",
  "ferrum-crypto",
- "ferrum-mempool",
  "ferrum-script",
  "ferrum-storage",
  "ferrum-types",
  "ferrum-wallet",
  "hex",
  "jsonrpsee",
+ "parking_lot",
  "serde",
  "serde_json",
  "tempfile",

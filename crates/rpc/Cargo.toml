@@ -17,21 +17,24 @@ ferrum-crypto = { workspace = true }
 ferrum-script = { workspace = true }
 ferrum-chain = { workspace = true }
 ferrum-storage = { workspace = true }
-ferrum-mempool = { workspace = true }
 ferrum-consensus = { workspace = true }
 ferrum-wallet = { workspace = true }
 jsonrpsee = { workspace = true }
 axum = { workspace = true }
-tower = { workspace = true }
+# `util` carries `ServiceExt`, which the REST tests use to drive the router
+# without binding a socket. It is already enabled elsewhere in the graph;
+# naming it here means this crate does not depend on someone else's features.
+tower = { workspace = true, features = ["util"] }
 tower-http = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+borsh = { workspace = true }
 hex = { workspace = true }
+parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-

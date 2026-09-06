@@ -23,6 +23,7 @@ parking_lot = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]
+ferrum-consensus = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 
