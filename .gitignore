@@ -17,3 +17,6 @@ node_modules
 /testing/fuzz/artifacts
 /testing/fuzz/corpus
 /testing/fuzz/target
+
+# agent worktrees and local session state
+/.claude/worktrees
