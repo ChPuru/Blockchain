@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferrum Explorer</title>
+<meta name="description" content="Block explorer for the Ferrum experimental blockchain">
+<style>
+  :root {
+    --bg:#fbfaf8; --panel:#ffffff; --panel-2:#f5f3ef; --line:#e6e2da;
+    --ink:#1c1a17; --ink-2:#5d5852; --ink-3:#8a847c;
+    --accent:#b4530a; --accent-soft:#fdf0e4;
+    --good:#2f6f4f; --warn:#8a6d1f; --bad:#a33221;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,"Cascadia Mono","Roboto Mono",Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Inter,Roboto,"Helvetica Neue",sans-serif;
+    --radius:10px;
+    --shadow:0 1px 2px rgba(28,26,23,.05), 0 4px 14px -6px rgba(28,26,23,.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#14130f; --panel:#1c1a16; --panel-2:#232019; --line:#33302a;
+      --ink:#f0ece4; --ink-2:#b3aca0; --ink-3:#7d766c;
+      --accent:#e8913f; --accent-soft:#2a2117;
+      --good:#6fbf90; --warn:#d6b25a; --bad:#e08272;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px -8px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#14130f; --panel:#1c1a16; --panel-2:#232019; --line:#33302a;
+    --ink:#f0ece4; --ink-2:#b3aca0; --ink-3:#7d766c;
+    --accent:#e8913f; --accent-soft:#2a2117;
+    --good:#6fbf90; --warn:#d6b25a; --bad:#e08272;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px -8px rgba(0,0,0,.6);
+  }
+
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 var(--sans);
+       -webkit-font-smoothing:antialiased}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code,.mono{font-family:var(--mono);font-size:.86em;font-variant-ligatures:none}
+
+  .wrap{max-width:1080px;margin:0 auto;padding:0 20px}
+
+  /* ---- banner ---- */
+  .banner{background:var(--accent-soft);border-bottom:1px solid var(--line);
+          color:var(--ink-2);font-size:13px;padding:9px 0;text-align:center}
+  .banner b{color:var(--ink)}
+
+  /* ---- header ---- */
+  header{border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:20}
+  .hrow{display:flex;align-items:center;gap:18px;padding:14px 0}
+  .brand{display:flex;align-items:baseline;gap:9px;font-weight:640;font-size:19px;letter-spacing:-.01em;
+         color:var(--ink);white-space:nowrap}
+  .brand span{font-size:11px;font-weight:560;letter-spacing:.09em;text-transform:uppercase;
+              color:var(--accent);border:1px solid currentColor;border-radius:4px;padding:1px 5px}
+  form.search{flex:1;display:flex;min-width:0}
+  form.search input{flex:1;min-width:0;font:14px var(--mono);padding:9px 12px;color:var(--ink);
+    background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius) 0 0 var(--radius);outline:none}
+  form.search input:focus{border-color:var(--accent)}
+  form.search button{font:600 13px var(--sans);padding:9px 16px;cursor:pointer;color:var(--panel);
+    background:var(--accent);border:1px solid var(--accent);border-radius:0 var(--radius) var(--radius) 0}
+  .themebtn{background:none;border:1px solid var(--line);border-radius:var(--radius);color:var(--ink-2);
+    cursor:pointer;font-size:15px;padding:8px 10px;line-height:1}
+  .themebtn:hover{color:var(--ink);border-color:var(--ink-3)}
+
+  /* ---- stat strip ---- */
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;
+         background:var(--line);border:1px solid var(--line);border-radius:var(--radius);
+         overflow:hidden;margin:22px 0}
+  .stat{background:var(--panel);padding:13px 15px}
+  .stat dt{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin:0 0 3px}
+  .stat dd{margin:0;font:600 18px/1.2 var(--mono);color:var(--ink);
+           overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* ---- panels ---- */
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+         box-shadow:var(--shadow);margin:0 0 22px;overflow:hidden}
+  .panel > h2{margin:0;padding:13px 16px;font-size:13px;font-weight:640;letter-spacing:.04em;
+              text-transform:uppercase;color:var(--ink-2);border-bottom:1px solid var(--line);
+              background:var(--panel-2);display:flex;justify-content:space-between;align-items:center;gap:10px}
+  .panel > h2 .sub{font:400 12px var(--mono);text-transform:none;letter-spacing:0;color:var(--ink-3)}
+
+  table{width:100%;border-collapse:collapse}
+  .scroll{overflow-x:auto}
+  th,td{padding:10px 16px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr:hover{background:var(--panel-2)}
+  td.num{text-align:right;font-family:var(--mono)}
+
+  dl.kv{margin:0;display:grid;grid-template-columns:190px 1fr}
+  dl.kv dt{padding:10px 16px;color:var(--ink-2);border-bottom:1px solid var(--line);font-size:13px}
+  dl.kv dd{padding:10px 16px;margin:0;border-bottom:1px solid var(--line);
+           font-family:var(--mono);font-size:13px;overflow-wrap:anywhere}
+  dl.kv dt:last-of-type,dl.kv dd:last-of-type{border-bottom:none}
+  @media (max-width:640px){
+    dl.kv{grid-template-columns:1fr}
+    dl.kv dt{border-bottom:none;padding-bottom:0}
+    .hrow{flex-wrap:wrap}
+    .brand{width:100%}
+  }
+
+  .pill{display:inline-block;font:600 11px var(--sans);letter-spacing:.04em;text-transform:uppercase;
+        padding:2px 7px;border-radius:20px;border:1px solid currentColor}
+  .pill.ok{color:var(--good)} .pill.warn{color:var(--warn)} .pill.bad{color:var(--bad)}
+  .pill.pow{color:var(--accent)}
+
+  .muted{color:var(--ink-3)}
+  .hash{font-family:var(--mono);font-size:12.5px}
+  .empty{padding:34px 16px;text-align:center;color:var(--ink-3);font-size:14px}
+  .err{padding:16px;border-left:3px solid var(--bad);background:var(--panel-2);color:var(--ink);
+       border-radius:0 var(--radius) var(--radius) 0;margin:0 0 22px}
+
+  .io{display:grid;grid-template-columns:1fr auto 1fr;gap:12px;padding:13px 16px;
+      border-bottom:1px solid var(--line);align-items:start}
+  .io:last-child{border-bottom:none}
+  .io .arrow{color:var(--ink-3);align-self:center;font-size:17px}
+  .io ul{margin:0;padding:0;list-style:none}
+  .io li{padding:5px 0;font-family:var(--mono);font-size:12.5px;overflow-wrap:anywhere}
+  .io .amt{color:var(--good);font-weight:600}
+  .io h4{margin:0 0 5px;font:600 11px var(--sans);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
+  @media (max-width:640px){.io{grid-template-columns:1fr}.io .arrow{transform:rotate(90deg);justify-self:start}}
+
+  .faucet{display:flex;gap:9px;padding:16px;flex-wrap:wrap}
+  .faucet input{flex:1;min-width:230px;font:13px var(--mono);padding:9px 11px;color:var(--ink);
+    background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);outline:none}
+  .faucet input:focus{border-color:var(--accent)}
+  .faucet button{font:600 13px var(--sans);padding:9px 18px;cursor:pointer;color:var(--panel);
+    background:var(--accent);border:none;border-radius:var(--radius)}
+  .faucet button:disabled{opacity:.5;cursor:not-allowed}
+  .faucet .note{flex-basis:100%;font-size:12.5px;color:var(--ink-3);margin:0}
+
+  footer{border-top:1px solid var(--line);margin-top:36px;padding:22px 0 40px;
+         color:var(--ink-3);font-size:13px}
+  footer a{color:var(--ink-2)}
+  .spin{display:inline-block;width:13px;height:13px;border:2px solid var(--line);
+        border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;
+        vertical-align:-2px;margin-right:7px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion:reduce){.spin{animation:none}}
+</style>
+</head>
+<body>
+
+<div class="banner">
+  <div class="wrap">
+    <b>Experimental network.</b> The token is never sold, never priced, and never promised to
+    appreciate. Do not put anything of value on this chain.
+  </div>
+</div>
+
+<header>
+  <div class="wrap hrow">
+    <a class="brand" href="#/"><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><path fill="currentColor" d="M10 1 2.5 5.2v9.6L10 19l7.5-4.2V5.2Zm0 2.1 5.6 3.1L10 9.4 4.4 6.2Zm-6 4.6 5.2 2.9v5.7L4 13.5Zm7.2 8.6v-5.7L16.4 7.7v5.8Z"/></svg>
+      Ferrum <span id="netbadge">devnet</span></a>
+    <form class="search" id="searchform" role="search">
+      <input id="q" placeholder="Search block height, block hash, transaction id, or address"
+             aria-label="Search" autocomplete="off" spellcheck="false">
+      <button type="submit">Search</button>
+    </form>
+    <button class="themebtn" id="theme" title="Toggle theme" aria-label="Toggle colour theme">◐</button>
+  </div>
+</header>
+
+<main class="wrap" id="view" aria-live="polite">
+  <p class="empty"><span class="spin"></span>Loading…</p>
+</main>
+
+<footer>
+  <div class="wrap">
+    Ferrum — a UTXO blockchain built from scratch in Rust.
+    <a href="/api/stats">API</a> ·
+    <a href="https://github.com/rahuldhali/ferrum">Source</a> ·
+    MIT or Apache-2.0
+  </div>
+</footer>
+
+<script>
+"use strict";
+/* --------------------------------------------------------------- utilities */
+const $ = (s, r = document) => r.querySelector(s);
+const el = (t, a = {}, ...kids) => {
+  const n = document.createElement(t);
+  for (const [k, v] of Object.entries(a)) {
+    if (v == null || v === false) continue;
+    if (k === "class") n.className = v;
+    else if (k === "html") n.innerHTML = v;
+    else n.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    n.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  return n;
+};
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const short = (h, n = 10) => (!h ? "—" : h.length <= n * 2 + 1 ? h : `${h.slice(0, n)}…${h.slice(-n)}`);
+
+// Amounts arrive as an integer count of grains. Formatting is done with string
+// arithmetic, never floats: 21 million FRM in grains exceeds 2^53, so a Number
+// cannot hold the value exactly and JSON.parse would silently round it.
+const GRAIN_DP = 8;
+function frm(grains) {
+  let s = String(grains ?? "0").replace(/^-/, "");
+  const neg = String(grains ?? "").startsWith("-");
+  s = s.padStart(GRAIN_DP + 1, "0");
+  const whole = s.slice(0, -GRAIN_DP).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const frac = s.slice(-GRAIN_DP).replace(/0+$/, "");
+  return `${neg ? "-" : ""}${whole}${frac ? "." + frac : ""}`;
+}
+const ago = (ms) => {
+  const d = Math.max(0, Date.now() - Number(ms));
+  const u = [[86400000, "d"], [3600000, "h"], [60000, "m"], [1000, "s"]];
+  for (const [n, l] of u) if (d >= n) return `${Math.floor(d / n)}${l} ago`;
+  return "just now";
+};
+const stamp = (ms) => new Date(Number(ms)).toISOString().replace("T", " ").replace(".000Z", "Z");
+
+async function api(path) {
+  const r = await fetch(`/api${path}`, { headers: { accept: "application/json" } });
+  if (!r.ok) {
+    let detail = `${r.status} ${r.statusText}`;
+    try { const j = await r.json(); if (j && j.error) detail = j.error; } catch {}
+    throw new Error(detail);
+  }
+  return r.json();
+}
+
+const linkBlock = (h, txt) => el("a", { class: "hash", href: `#/block/${h}` }, txt ?? short(h));
+const linkTx = (h, txt) => el("a", { class: "hash", href: `#/tx/${h}` }, txt ?? short(h));
+const linkAddr = (a, txt) => el("a", { class: "hash", href: `#/address/${a}` }, txt ?? short(a, 12));
+
+function render(...nodes) {
+  const v = $("#view");
+  v.replaceChildren(...nodes.flat().filter(Boolean));
+  window.scrollTo(0, 0);
+}
+const loading = () => render(el("p", { class: "empty" }, el("span", { class: "spin" }), "Loading…"));
+const failure = (e, what) => render(
+  el("div", { class: "err" },
+    el("strong", {}, `Could not load ${what}. `),
+    el("span", { class: "muted" }, e.message)),
+  el("p", {}, el("a", { href: "#/" }, "← Back to the chain")));
+
+function panel(title, sub, body) {
+  return el("div", { class: "panel" },
+    el("h2", {}, title, sub ? el("span", { class: "sub" }, sub) : null),
+    body);
+}
+function kv(rows) {
+  const dl = el("dl", { class: "kv" });
+  for (const [k, v] of rows) {
+    if (v == null) continue;
+    dl.append(el("dt", {}, k), el("dd", {}, v));
+  }
+  return dl;
+}
+function table(headers, rows, emptyMsg) {
+  if (!rows.length) return el("p", { class: "empty" }, emptyMsg);
+  return el("div", { class: "scroll" }, el("table", {},
+    el("thead", {}, el("tr", {}, headers.map((h) =>
+      el("th", { class: h.num ? "num" : null }, h.label ?? h)))),
+    el("tbody", {}, rows)));
+}
+
+/* ------------------------------------------------------------------ views */
+async function viewHome() {
+  loading();
+  try {
+    const s = await api("/stats");
+    $("#netbadge").textContent = s.chain ?? "devnet";
+    document.title = `Ferrum Explorer — height ${s.height}`;
+
+    const stats = el("dl", { class: "stats" },
+      [["Height", String(s.height)],
+       ["Difficulty", s.difficulty ?? "—"],
+       ["Engine", (s.engine ?? "pow").toUpperCase()],
+       ["Mempool", `${s.mempool_size ?? 0} tx`],
+       ["UTXOs", String(s.utxo_count ?? 0)],
+       ["Peers", String(s.peers ?? 0)]].map(([k, v]) =>
+        el("div", { class: "stat" }, el("dt", {}, k), el("dd", { title: v }, v))));
+
+    const blocks = (s.recent_blocks ?? []).map((b) =>
+      el("tr", {},
+        el("td", {}, linkBlock(b.height, `#${b.height}`)),
+        el("td", {}, linkBlock(b.hash)),
+        el("td", { class: "num" }, String(b.tx_count ?? 0)),
+        el("td", { class: "num" }, String(b.size ?? 0)),
+        el("td", { class: "muted" }, ago(b.timestamp_ms))));
+
+    const txs = (s.recent_txs ?? []).map((t) =>
+      el("tr", {},
+        el("td", {}, linkTx(t.txid)),
+        el("td", { class: "num" }, frm(t.value)),
+        el("td", { class: "num" }, frm(t.fee)),
+        el("td", {}, t.height != null ? linkBlock(t.height, `#${t.height}`)
+                                      : el("span", { class: "pill warn" }, "pending"))));
+
+    const finality = s.finalized_height != null
+      ? `finalized at ${s.finalized_height}`
+      : "no finality under proof of work — nothing is ever final";
+
+    render(
+      stats,
+      panel("Recent blocks", finality,
+        table(["Height", "Hash", { label: "Txs", num: true }, { label: "Bytes", num: true }, "Age"],
+              blocks, "No blocks yet.")),
+      panel("Recent transactions", null,
+        table(["Transaction", { label: "Value", num: true }, { label: "Fee", num: true }, "Block"],
+              txs, "No transactions yet.")),
+      s.faucet_enabled ? faucetPanel() : null);
+  } catch (e) { failure(e, "the chain overview"); }
+}
+
+function faucetPanel() {
+  const input = el("input", { placeholder: "Your address (fer1… / tfer1… / rfer1…)",
+                              spellcheck: "false", autocomplete: "off", "aria-label": "Address" });
+  const btn = el("button", {}, "Request coins");
+  const out = el("p", { class: "note" },
+    "Test coins with no value, rate-limited per address. This faucet dispenses tokens for an " +
+    "experimental network; they are not for sale and are not worth anything.");
+  const form = el("form", { class: "faucet" }, input, btn, out);
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const address = input.value.trim();
+    if (!address) return;
+    btn.disabled = true; btn.textContent = "Sending…";
+    try {
+      const r = await fetch("/api/faucet", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ address }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error ?? `${r.status} ${r.statusText}`);
+      out.replaceChildren("Sent. ");
+      out.append(linkTx(j.txid, j.txid));
+    } catch (e) {
+      out.textContent = `Faucet declined: ${e.message}`;
+    } finally { btn.disabled = false; btn.textContent = "Request coins"; }
+  });
+  return panel("Faucet", null, form);
+}
+
+async function viewBlock(id) {
+  loading();
+  try {
+    const b = await api(`/block/${encodeURIComponent(id)}`);
+    document.title = `Block ${b.height} — Ferrum`;
+    const h = b.header ?? b;
+    const nav = el("div", {},
+      b.height > 0 ? linkBlock(b.height - 1, "← previous") : el("span", { class: "muted" }, "← previous"),
+      " · ",
+      b.next_hash ? linkBlock(b.height + 1, "next →") : el("span", { class: "muted" }, "next →"));
+
+    const txs = (b.txs ?? []).map((t, i) =>
+      el("tr", {},
+        el("td", {}, linkTx(t.txid)),
+        el("td", {}, i === 0 ? el("span", { class: "pill pow" }, "coinbase") : `${t.vin ?? 0} in`),
+        el("td", { class: "num" }, String(t.vout ?? 0)),
+        el("td", { class: "num" }, frm(t.value)),
+        el("td", { class: "num" }, i === 0 ? "—" : frm(t.fee))));
+
+    render(
+      panel(`Block ${b.height}`, nav, kv([
+        ["Hash", el("span", { class: "hash" }, b.hash)],
+        ["Previous", b.height > 0 ? linkBlock(h.prev_hash, h.prev_hash) : el("span", { class: "muted" }, "genesis")],
+        ["Merkle root", el("span", { class: "hash" }, h.merkle_root)],
+        ["Timestamp", `${stamp(h.timestamp_ms)} (${ago(h.timestamp_ms)})`],
+        ["Difficulty bits", `0x${(h.bits >>> 0).toString(16).padStart(8, "0")}`],
+        ["Nonce", String(h.nonce)],
+        ["Version", String(h.version)],
+        ["Cumulative work", b.total_work ? el("span", { class: "hash" }, b.total_work) : null],
+        ["Size", `${b.size ?? 0} bytes`],
+        ["Transactions", String((b.txs ?? []).length)],
+        ["Consensus", el("span", { class: "pill pow" }, (b.engine ?? "pow").toUpperCase())],
+        ["Confirmations", b.confirmations != null ? String(b.confirmations) : null],
+      ])),
+      panel("Transactions", null,
+        table(["Transaction", "Inputs", { label: "Outputs", num: true },
+               { label: "Value", num: true }, { label: "Fee", num: true }],
+              txs, "This block has no transactions.")));
+  } catch (e) { failure(e, `block ${esc(id)}`); }
+}
+
+async function viewTx(txid) {
+  loading();
+  try {
+    const t = await api(`/tx/${encodeURIComponent(txid)}`);
+    document.title = `Transaction ${short(txid, 8)} — Ferrum`;
+
+    const inputs = el("ul", {}, (t.inputs ?? []).map((i) =>
+      el("li", {}, i.coinbase
+        ? el("span", { class: "pill pow" }, "newly minted")
+        : [linkTx(i.txid, `${short(i.txid, 8)}:${i.vout}`), " ",
+           el("span", { class: "amt" }, frm(i.value)), " ",
+           i.address ? linkAddr(i.address) : el("span", { class: "muted" }, "—")])));
+
+    const outputs = el("ul", {}, (t.outputs ?? []).map((o, n) =>
+      el("li", {}, `${n}. `,
+        o.address ? linkAddr(o.address) : el("span", { class: "muted" }, o.script_type ?? "non-standard"),
+        " ", el("span", { class: "amt" }, frm(o.value)),
+        o.spent_by ? [" ", linkTx(o.spent_by, "(spent)")]
+                   : el("span", { class: "pill ok" }, "unspent"))));
+
+    render(
+      panel("Transaction", t.confirmations != null ? `${t.confirmations} confirmations` : "in mempool",
+        kv([
+          ["Transaction id", el("span", { class: "hash" }, t.txid)],
+          ["Status", t.block_hash
+            ? el("span", { class: "pill ok" }, "confirmed")
+            : el("span", { class: "pill warn" }, "pending")],
+          ["Block", t.block_hash ? linkBlock(t.height, `#${t.height} · ${short(t.block_hash)}`) : null],
+          ["Version", String(t.version)],
+          ["Lock time", t.lock_time
+            ? `${t.lock_time} (${t.lock_time < 500000000 ? "block height" : "unix seconds"})`
+            : "0 (final)"],
+          ["Size", `${t.size ?? 0} bytes`],
+          ["Total value", frm(t.value)],
+          ["Fee", t.coinbase ? "— (coinbase)" : `${frm(t.fee)} FRM`],
+          ["Fee rate", t.fee_rate != null ? `${t.fee_rate} grains / kB` : null],
+        ])),
+      panel("Inputs and outputs", null,
+        el("div", { class: "io" },
+          el("div", {}, el("h4", {}, `Inputs (${(t.inputs ?? []).length})`), inputs),
+          el("div", { class: "arrow" }, "→"),
+          el("div", {}, el("h4", {}, `Outputs (${(t.outputs ?? []).length})`), outputs))));
+  } catch (e) { failure(e, `transaction ${esc(short(txid, 8))}`); }
+}
+
+async function viewAddress(addr) {
+  loading();
+  try {
+    const a = await api(`/address/${encodeURIComponent(addr)}`);
+    document.title = `${short(addr, 8)} — Ferrum`;
+
+    const rows = (a.transactions ?? []).map((t) =>
+      el("tr", {},
+        el("td", {}, linkTx(t.txid)),
+        el("td", {}, t.height != null ? linkBlock(t.height, `#${t.height}`)
+                                      : el("span", { class: "pill warn" }, "pending")),
+        el("td", { class: "num", style: `color:var(--${String(t.delta).startsWith("-") ? "bad" : "good"})` },
+           `${String(t.delta).startsWith("-") ? "" : "+"}${frm(t.delta)}`),
+        el("td", { class: "muted" }, t.timestamp_ms ? ago(t.timestamp_ms) : "—")));
+
+    const stats = el("dl", { class: "stats" },
+      [["Confirmed", frm(a.confirmed)],
+       ["Immature", frm(a.immature)],
+       ["Pending", frm(a.pending ?? 0)],
+       ["UTXOs", String(a.utxo_count ?? 0)],
+       ["Transactions", String(a.tx_count ?? 0)]].map(([k, v]) =>
+        el("div", { class: "stat" }, el("dt", {}, k), el("dd", { title: v }, v))));
+
+    render(
+      panel("Address", null, kv([
+        ["Address", el("span", { class: "hash" }, a.address)],
+        ["Type", a.script_type ?? "—"],
+      ])),
+      stats,
+      a.immature && a.immature !== "0"
+        ? el("p", { class: "muted", style: "margin:-10px 0 20px;font-size:13px" },
+            "Immature coins are coinbase outputs younger than 100 blocks. That maturity window is a " +
+            "consensus rule, not a wallet policy: spending a coinbase immediately would lose the coins " +
+            "on any reorg deeper than the spend.")
+        : null,
+      panel("History", `${a.tx_count ?? 0} transactions`,
+        table(["Transaction", "Block", { label: "Change", num: true }, "Age"],
+              rows, "No transactions for this address.")));
+  } catch (e) { failure(e, `address ${esc(short(addr, 10))}`); }
+}
+
+async function viewSearch(q) {
+  loading();
+  try {
+    const r = await api(`/search?q=${encodeURIComponent(q)}`);
+    if (r.kind && r.id != null) { location.hash = `#/${r.kind}/${r.id}`; return; }
+    render(panel("No match", null,
+      el("p", { class: "empty" },
+        `Nothing on this chain matches “${esc(q)}”. Try a block height, a 64-character block hash `
+        + `or transaction id, or an address.`)));
+  } catch (e) { failure(e, `search for “${esc(q)}”`); }
+}
+
+/* ----------------------------------------------------------------- router */
+function route() {
+  const h = location.hash.replace(/^#\/?/, "");
+  const [kind, ...rest] = h.split("/");
+  const id = rest.join("/");
+  if (!kind) return viewHome();
+  if (kind === "block") return viewBlock(id);
+  if (kind === "tx") return viewTx(id);
+  if (kind === "address") return viewAddress(id);
+  if (kind === "search") return viewSearch(decodeURIComponent(id));
+  return viewHome();
+}
+
+$("#searchform").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const q = $("#q").value.trim();
+  if (!q) return;
+  // Route obvious shapes directly; anything ambiguous goes to the server, which
+  // is the only thing that can tell a 64-hex block hash from a transaction id.
+  if (/^\d+$/.test(q)) location.hash = `#/block/${q}`;
+  else if (/^(fer|tfer|rfer)1[02-9ac-hj-np-z]+$/i.test(q)) location.hash = `#/address/${q}`;
+  else location.hash = `#/search/${encodeURIComponent(q)}`;
+  $("#q").blur();
+});
+
+$("#theme").addEventListener("click", () => {
+  const now = document.documentElement.getAttribute("data-theme");
+  const next = now === "dark" ? "light" : now === "light" ? "auto" : "dark";
+  document.documentElement.setAttribute("data-theme", next);
+  try { localStorage.setItem("ferrum-theme", next); } catch {}
+});
+try {
+  const saved = localStorage.getItem("ferrum-theme");
+  if (saved) document.documentElement.setAttribute("data-theme", saved);
+} catch {}
+
+window.addEventListener("hashchange", route);
+route();
+// The home view is the only one that changes on its own; refreshing a specific
+// block or transaction would fight the reader for scroll position.
+setInterval(() => { if (!location.hash.replace(/^#\/?/, "")) route(); }, 10000);
+</script>
+</body>
+</html>
