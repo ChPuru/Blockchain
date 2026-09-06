@@ -140,7 +140,10 @@ mod tests {
 
     #[test]
     fn display_messages_are_stable() {
-        assert_eq!(CryptoError::InvalidSecretKey.to_string(), "invalid secret key: not a scalar in 1..n");
+        assert_eq!(
+            CryptoError::InvalidSecretKey.to_string(),
+            "invalid secret key: not a scalar in 1..n"
+        );
         assert_eq!(
             CryptoError::BatchVerificationFailed { index: 3 }.to_string(),
             "batch signature verification failed at index 3"
