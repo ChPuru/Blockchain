@@ -1,0 +1,28 @@
+[package]
+name        = "ferrum-consensus"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+description = "Pluggable consensus engines for Ferrum: proof-of-work and BFT"
+
+[lints]
+workspace = true
+
+[dependencies]
+ferrum-types = { workspace = true }
+ferrum-crypto = { workspace = true }
+primitive-types = { workspace = true }
+borsh = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_json = { workspace = true }
+

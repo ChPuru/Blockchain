@@ -1,0 +1,33 @@
+[package]
+name        = "ferrum-e2e"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+description = "End-to-end multi-node integration tests for Ferrum"
+
+[lints]
+workspace = true
+
+[dependencies]
+ferrum-types = { workspace = true }
+ferrum-crypto = { workspace = true }
+ferrum-chain = { workspace = true }
+ferrum-wallet = { workspace = true }
+ferrum-node = { workspace = true }
+ferrum-rpc = { workspace = true }
+ferrum-consensus = { workspace = true }
+tokio = { workspace = true }
+jsonrpsee = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+

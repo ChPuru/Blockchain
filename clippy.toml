@@ -1,0 +1,15 @@
+# Mechanically enforce the determinism seam: none of these may appear inside the
+# state-transition path. See docs/SPEC.md section "Determinism".
+disallowed-methods = [
+    { path = "std::time::SystemTime::now",       reason = "non-deterministic: block time comes from BlockCtx" },
+    { path = "std::time::Instant::now",          reason = "non-deterministic in consensus code" },
+    { path = "std::collections::HashMap::iter",  reason = "iteration order is not deterministic; use BTreeMap" },
+    { path = "std::collections::HashSet::iter",  reason = "iteration order is not deterministic; use BTreeSet" },
+]
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "non-deterministic iteration order; use BTreeMap in consensus code" },
+    { path = "std::collections::HashSet", reason = "non-deterministic iteration order; use BTreeSet in consensus code" },
+    { path = "f32", reason = "floats are platform-dependent: a chain split waiting to happen" },
+    { path = "f64", reason = "floats are platform-dependent: a chain split waiting to happen" },
+]
+avoid-breaking-exported-api = false

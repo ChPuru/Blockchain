@@ -1,0 +1,151 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/types",
+    "crates/crypto",
+    "crates/script",
+    "crates/storage",
+    "crates/consensus",
+    "crates/chain",
+    "crates/mempool",
+    "crates/p2p",
+    "crates/rpc",
+    "crates/wallet",
+    "crates/node",
+    "crates/cli",
+    "testing/sim",
+    "testing/e2e",
+]
+exclude = ["testing/fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rahuldhali/ferrum"
+authors = ["Rahul Dhali <rahul.dhali@lh2holdings.com>"]
+homepage = "https://ferrum.chain"
+description = "Ferrum - a UTXO blockchain with a stack-based script VM and pluggable PoW/BFT consensus"
+
+[workspace.dependencies]
+# --- internal crates ---
+ferrum-types     = { path = "crates/types",     version = "0.1.0" }
+ferrum-crypto    = { path = "crates/crypto",    version = "0.1.0" }
+ferrum-script    = { path = "crates/script",    version = "0.1.0" }
+ferrum-storage   = { path = "crates/storage",   version = "0.1.0" }
+ferrum-consensus = { path = "crates/consensus", version = "0.1.0" }
+ferrum-chain     = { path = "crates/chain",     version = "0.1.0" }
+ferrum-mempool   = { path = "crates/mempool",   version = "0.1.0" }
+ferrum-p2p       = { path = "crates/p2p",       version = "0.1.0" }
+ferrum-rpc       = { path = "crates/rpc",       version = "0.1.0" }
+ferrum-wallet    = { path = "crates/wallet",    version = "0.1.0" }
+ferrum-node      = { path = "crates/node",      version = "0.1.0" }
+
+# --- codec / encoding ---
+borsh       = { version = "1.5", features = ["derive"] }
+hex         = "0.4"
+bech32      = "0.11"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+toml        = "0.9"
+
+# --- crypto ---
+blake3      = "1"
+sha2        = "0.10"
+ripemd      = "0.1"
+hmac        = "0.12"
+pbkdf2      = { version = "0.12", default-features = false }
+k256        = { version = "0.13", default-features = false, features = ["schnorr", "ecdsa", "arithmetic", "std"] }
+rand        = "0.8"
+rand_core   = "0.6"
+zeroize     = { version = "1", features = ["derive"] }
+subtle      = "2"
+unicode-normalization = "0.1"
+
+# --- numerics ---
+primitive-types = { version = "0.13", default-features = false }
+
+# --- storage ---
+redb        = "2"
+
+# --- async / runtime ---
+tokio       = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs", "io-util", "net"] }
+tokio-util  = { version = "0.7", features = ["rt"] }
+tokio-stream = "0.1"
+futures     = "0.3"
+async-trait = "0.1"
+
+# --- p2p ---
+libp2p      = { version = "0.55", features = ["tokio", "gossipsub", "noise", "yamux", "tcp", "identify", "ping", "macros", "request-response", "cbor", "dns"] }
+
+# --- rpc / http ---
+jsonrpsee   = { version = "0.24", features = ["server", "http-client", "ws-client", "macros"] }
+axum        = "0.8"
+tower        = "0.5"
+tower-http  = { version = "0.6", features = ["cors", "fs", "trace", "limit"] }
+
+# --- cli / observability ---
+clap        = { version = "4", features = ["derive", "env"] }
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+metrics     = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# --- utility ---
+thiserror   = "2"
+anyhow      = "1"
+parking_lot = "0.12"
+arrayvec    = "0.7"
+smallvec    = "1"
+directories = "5"
+humantime   = "2"
+
+# --- test / dev ---
+proptest    = "1"
+tempfile    = "3"
+criterion   = { version = "0.5", features = ["html_reports"] }
+assert_cmd  = "2"
+predicates  = "3"
+
+[workspace.lints.rust]
+unsafe_code            = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub        = "warn"
+rust_2018_idioms       = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all                    = { level = "warn", priority = -1 }
+unwrap_used            = "warn"
+todo                   = "warn"
+dbg_macro              = "deny"
+mem_forget             = "deny"
+float_arithmetic       = "deny"
+await_holding_lock     = "deny"
+large_stack_arrays     = "warn"
+missing_const_for_fn   = "allow"
+module_name_repetitions = "allow"
+
+[profile.release]
+opt-level        = 3
+lto              = "thin"
+codegen-units    = 1
+panic            = "unwind"
+overflow-checks  = true
+debug            = 1
+
+[profile.bench]
+inherits = "release"
+debug = true
+
+[profile.dev]
+opt-level = 0
+overflow-checks = true
+
+# Fast crypto even in debug builds; makes the test-suite tolerable.
+[profile.dev.package.k256]
+opt-level = 3
+[profile.dev.package.blake3]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3

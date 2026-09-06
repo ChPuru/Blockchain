@@ -1,0 +1,36 @@
+[package]
+name        = "ferrum-crypto"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+description = "Domain-separated hashing, BIP-340 Schnorr, Merkle trees and BIP-32/39 for Ferrum"
+
+[lints]
+workspace = true
+
+[dependencies]
+ferrum-types = { workspace = true }
+blake3 = { workspace = true }
+sha2 = { workspace = true }
+ripemd = { workspace = true }
+hmac = { workspace = true }
+pbkdf2 = { workspace = true }
+k256 = { workspace = true }
+rand_core = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }
+bech32 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+unicode-normalization = { workspace = true }
+borsh = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+

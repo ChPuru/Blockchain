@@ -1,0 +1,29 @@
+[package]
+name        = "ferrum-p2p"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+description = "libp2p networking stack for Ferrum: noise, yamux, gossipsub and block sync"
+
+[lints]
+workspace = true
+
+[dependencies]
+ferrum-types = { workspace = true }
+ferrum-crypto = { workspace = true }
+libp2p = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+borsh = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+

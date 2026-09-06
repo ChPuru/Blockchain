@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with: { components: rustfmt }
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Consensus-critical crates additionally forbid unchecked integer arithmetic:
+      # a silent wrap in fee, subsidy or difficulty maths is a chain split.
+      - name: clippy - checked arithmetic in consensus crates
+        run: |
+          cargo clippy -p ferrum-chain -p ferrum-script -p ferrum-consensus --lib \
+            -- -D warnings -D clippy::arithmetic_side_effects
+
+  invariants:
+    name: structural invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-invariants.sh
+
+  test:
+    name: test (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: |
+          if [ "${{ matrix.profile }}" = "release" ]; then
+            cargo test --workspace --all-targets --release
+          else
+            cargo test --workspace --all-targets
+          fi
+      # Determinism is only proven if the SAME state-root sequence comes out of
+      # both optimisation levels. Running one profile only would hide a UB-free
+      # but optimisation-sensitive bug in the executor.
+      - name: determinism replay golden file
+        run: cargo test -p ferrum-sim --test determinism -- --nocapture
+
+  cross:
+    name: determinism on aarch64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with: { targets: aarch64-unknown-linux-gnu }
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          sudo apt-get update && sudo apt-get install -y qemu-user-static gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\nrunner = "qemu-aarch64-static -L /usr/aarch64-linux-gnu"\n' >> .cargo/config.toml
+      - name: state transition is byte-identical on a different architecture
+        run: cargo test --target aarch64-unknown-linux-gnu -p ferrum-sim -p ferrum-types -p ferrum-crypto
+
+  asert:
+    name: ASERT cross-check against the Python reference
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      # An independent implementation is the only thing that catches a shared
+      # misreading of the algorithm. Floats here would be a platform-dependent split.
+      - run: python testing/reference/asert.py --selftest
+      - run: cargo test -p ferrum-consensus asert -- --nocapture
+
+  fuzz:
+    name: fuzz smoke (decoder + script VM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-fuzz --locked
+      # The decoder is where unauthenticated bytes from anonymous peers land, and
+      # the script VM is the largest attack surface. 60s each on every push is
+      # cheap; deep runs happen before a release, not nightly.
+      - run: cd testing/fuzz && cargo fuzz run decode -- -max_total_time=60
+      - run: cd testing/fuzz && cargo fuzz run script -- -max_total_time=60
+
+  e2e:
+    name: multi-node devnet e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --bin chaind --bin chain-cli
+      # Four nodes, a partition, both sides mine, heal, and every node must agree
+      # on one tip hash. This is the test that a toy chain cannot pass.
+      - run: bash devnet/ci-e2e.sh
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with: { token: "${{ secrets.GITHUB_TOKEN }}" }

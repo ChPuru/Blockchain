@@ -1,0 +1,37 @@
+[package]
+name        = "ferrum-rpc"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+description = "JSON-RPC and REST interfaces for Ferrum, plus the explorer index API"
+
+[lints]
+workspace = true
+
+[dependencies]
+ferrum-types = { workspace = true }
+ferrum-crypto = { workspace = true }
+ferrum-script = { workspace = true }
+ferrum-chain = { workspace = true }
+ferrum-storage = { workspace = true }
+ferrum-mempool = { workspace = true }
+ferrum-consensus = { workspace = true }
+ferrum-wallet = { workspace = true }
+jsonrpsee = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+

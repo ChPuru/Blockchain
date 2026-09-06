@@ -1,0 +1,28 @@
+[package]
+name        = "ferrum-mempool"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+description = "Fee-ordered transaction mempool with orphan pool and reorg reconciliation"
+
+[lints]
+workspace = true
+
+[dependencies]
+ferrum-types = { workspace = true }
+ferrum-crypto = { workspace = true }
+ferrum-script = { workspace = true }
+ferrum-chain = { workspace = true }
+ferrum-storage = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
+
