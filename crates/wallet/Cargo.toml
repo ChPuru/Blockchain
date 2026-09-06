@@ -23,10 +23,13 @@ serde_json = { workspace = true }
 zeroize = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-rand_core = { workspace = true }
+rand_core = { workspace = true, features = ["getrandom"] }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+pbkdf2 = { workspace = true }
+subtle = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
 rand = { workspace = true }
-
