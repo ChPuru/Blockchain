@@ -20,3 +20,6 @@ node_modules
 
 # agent worktrees and local session state
 /.claude/worktrees
+
+# per-agent cargo target dirs (used to avoid target-lock contention)
+/target-*
