@@ -169,7 +169,7 @@ mod tests {
     fn a_document_has_no_bare_line() {
         let out = CommandOutput::document(json!({"height": 7}));
         assert_eq!(out.render(false).unwrap(), "");
-        assert_eq!(out.render(true).unwrap().contains("\"height\": 7"), true);
+        assert!(out.render(true).unwrap().contains("\"height\": 7"));
     }
 
     #[test]

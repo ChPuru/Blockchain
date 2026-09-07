@@ -105,10 +105,10 @@ fn parse_key_material(text: &str, network: Network) -> Result<LoadedKey, String>
 ///
 /// [`CliError::Io`] naming the path.
 pub fn write_key_file(path: &Path, mnemonic: &Mnemonic) -> CliResult<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| CliError::io(parent, e))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| CliError::io(parent, e))?;
     }
     let mut body = Zeroizing::new(String::with_capacity(mnemonic.phrase().len().saturating_add(1)));
     body.push_str(mnemonic.phrase());

@@ -18,15 +18,14 @@
 //! 3. **`script` needs no node.** Milestone M2 — "`chain-cli script eval` runs
 //!    P2PKH, 2-of-3 multisig and a CLTV timelock" — is a property of the
 //!    virtual machine, so the command is a pure function of its arguments.
-//! 4. **Every storage call in `chaind` crosses `spawn_blocking`.**
-//!    `ferrum-storage` is synchronous; a `redb` read on a Tokio worker parks
-//!    that worker and becomes a two-second p95 latency bug under load. The
-//!    node runtime in [`node`] routes through
-//!    [`node::runtime::blocking`] and the RPC layer through
-//!    `ferrum_rpc::context::blocking`.
-//! 5. **No queue is unbounded.** Every channel in [`node`] has a capacity
-//!    constant in [`node::limits`] and sheds with a `tracing::warn!` when it is
-//!    full (CONTRACT §10.3).
+//! 4. **`chaind` is a front end, not a node.** Everything a node *is* lives in
+//!    `ferrum-node`; [`daemon`] is the seam between an argument vector and
+//!    `ferrum_node::Node`. That split is what makes the node runtime testable
+//!    without spawning a process, and it is why this crate has no store, no
+//!    swarm and no mining loop of its own.
+//! 5. **`chain reindex` is the one place `chain-cli` touches a store.** It
+//!    opens `redb` directly, so the node must be stopped first — and it opens
+//!    the path `ferrum_node::NodeConfig` names, not a second guess at it.
 //!
 //! # Layout
 //!
@@ -40,16 +39,16 @@
 //! | [`paths`] | the datadir layout |
 //! | [`rpc`] | the typed JSON-RPC client |
 //! | [`http`] | a deliberately tiny POST, for the REST faucet |
-//! | [`node`] | `chaind`: configuration, wiring, mining and shutdown |
+//! | [`daemon`] | `chaind`: arguments in, `ferrum_node::Node` out |
 
 #![warn(missing_docs)]
 
 pub mod cli;
 pub mod commands;
+pub mod daemon;
 pub mod error;
 pub mod http;
 pub mod keyfile;
-pub mod node;
 pub mod output;
 pub mod passphrase;
 pub mod paths;
@@ -57,6 +56,7 @@ pub mod rpc;
 
 pub use crate::cli::{ChainCli, Command};
 pub use crate::commands::{Context, dispatch};
+pub use crate::daemon::ChaindArgs;
 pub use crate::error::{CliError, CliResult};
 pub use crate::output::CommandOutput;
 pub use crate::passphrase::PassphraseSource;

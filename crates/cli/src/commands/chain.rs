@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use ferrum_chain::ChainManager;
+use ferrum_chain::{ChainManager, connect_tip_block};
 use ferrum_consensus::EngineRouter;
 use ferrum_rpc::FerrumRpcClient as _;
 use ferrum_storage::{Store, StoreConfig};
@@ -94,9 +94,11 @@ pub async fn stateroot(ctx: &Context, height: Option<u64>) -> CliResult<CommandO
 ///
 /// Rebuilds `tx_index` and `addr_index` by disconnecting the active chain back
 /// to genesis and reconnecting it out of the stored block bodies. That is the
-/// honest way to do it: the index is written by `connect_block` and by nothing
-/// else, so replaying the connections is the only rebuild that cannot drift
-/// from what a live node would have written.
+/// honest way to do it: the index is written by `Store::connect_block` and by
+/// nothing else, so replaying the connections is the only rebuild that cannot
+/// drift from what a live node would have written. Every block is fully
+/// re-validated on the way back up, so a reindex is also a full audit of the
+/// chain on disk.
 ///
 /// The UTXO set is byte-identical afterwards — CONTRACT §8.3 guarantees that
 /// disconnecting `N` blocks and reconnecting them leaves the same state and
@@ -157,19 +159,21 @@ pub fn reindex(ctx: &Context, dry_run: bool, network: &str) -> CliResult<Command
         store.disconnect_tip()?;
     }
 
-    // A fresh manager: the one above cached the old tip, and rebuilding it
-    // from the wound-back store is cheaper than teaching it to be invalidated.
-    let chain = ChainManager::open(Arc::clone(&store), params.clone(), engines)?;
+    // `connect_tip_block`, not `ChainManager::accept_block`. Disconnecting
+    // leaves each header entry marked `Valid` — the block really was valid, and
+    // forgetting that would throw away work — so acceptance would answer
+    // `Duplicate` and reconnect nothing at all. `connect_tip_block` is the one
+    // place a block joins the active chain, on the miner's path, the sync path
+    // and the reorg path alike, and it re-runs the full validation and rewrites
+    // the index on the way.
     let mut replayed = 0u64;
     for hash in &hashes {
-        let block = store
-            .get_block(hash)?
-            .ok_or_else(|| CliError::internal(format!("block body for {hash} is missing")))?;
-        chain.accept_block(block)?;
+        connect_tip_block(&store, &params, &engines, hash)?;
         replayed = replayed.saturating_add(1);
     }
 
-    let (new_tip, new_height) = chain.tip();
+    let (new_tip, new_height) =
+        store.tip()?.ok_or_else(|| CliError::internal("the replay left no tip"))?;
     let root_after = store.state_root()?;
     store.flush()?;
 

@@ -19,7 +19,7 @@
 use std::path::Path;
 
 use ferrum_crypto::{Address, Mnemonic};
-use ferrum_types::{Amount, Coin, Network, OutPoint, Txid};
+use ferrum_types::{Amount, Coin, Network, OutPoint, Script, Txid};
 use ferrum_wallet::{SendRequest, Wallet};
 use serde_json::json;
 use zeroize::Zeroizing;
@@ -357,25 +357,35 @@ async fn sync_from_node(ctx: &Context, wallet: &mut Wallet) -> CliResult<u64> {
 
     for address in addresses {
         let encoded = address.encode();
-        let rows = client
-            .list_unspent(encoded.clone())
-            .await
-            .map_err(rpc_err("listunspent"))?;
-        let script = address.script_pubkey();
+        let rows =
+            client.list_unspent(encoded.clone()).await.map_err(rpc_err("listunspent"))?;
         for row in rows {
             let out_point = parse_outpoint(&row.outpoint)?;
+            // `listunspent` does not report coinbase-ness, and spending an
+            // immature coinbase is a **consensus** failure, not a policy one:
+            // the transaction is invalid and the wallet would have built a
+            // payment that can never confirm. `gettxout` carries the flag, so
+            // each candidate costs one more round trip and the wallet's idea
+            // of what it can spend matches the node's.
+            let Some(coin) = client
+                .get_tx_out(out_point.txid.to_string(), out_point.vout)
+                .await
+                .map_err(rpc_err("gettxout"))?
+            else {
+                // Spent between the two calls. Dropping it is right: the coin
+                // is gone, and the next sync will not see it either.
+                continue;
+            };
+            let script_pubkey = Script::from_hex(&coin.script_pubkey).map_err(|e| {
+                CliError::invalid("gettxout.script_pubkey", &coin.script_pubkey, e.to_string())
+            })?;
             utxos.push((
                 out_point,
                 Coin {
-                    value: row.value.0,
-                    script_pubkey: script.clone(),
-                    height: row.height,
-                    // `listunspent` does not report coinbase-ness, so a coin at
-                    // or below the maturity window is treated as mature here;
-                    // the node re-checks maturity on `sendrawtransaction` and
-                    // refuses an immature spend regardless of what the wallet
-                    // believed.
-                    is_coinbase: false,
+                    value: coin.value.0,
+                    script_pubkey,
+                    height: coin.height,
+                    is_coinbase: coin.is_coinbase,
                 },
             ));
         }

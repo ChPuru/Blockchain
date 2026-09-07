@@ -12,17 +12,22 @@ use ferrum_types::Network;
 use crate::error::{CliError, CliResult};
 
 /// The `redb` database file inside a datadir.
-pub const DB_FILE: &str = "chain.redb";
+///
+/// Re-exported from `ferrum-node` rather than restated. `chain reindex` opens
+/// this file directly, and a second spelling of the name would mean the
+/// rebuild silently operated on a store the node never writes.
+pub const DB_FILE: &str = ferrum_node::config::STORE_FILE;
 
 /// The encrypted wallet keystore inside a datadir.
 pub const WALLET_FILE: &str = "wallet.json";
 
-/// The libp2p identity inside a datadir.
+/// The node's own key inside a datadir.
 ///
 /// CONTRACT §13.1: without `--mine-address`, `chaind` mines to an address
 /// derived from this file, generating it on first run, so a devnet is
-/// startable with no wallet setup at all.
-pub const NODE_KEY_FILE: &str = "node.key";
+/// startable with no wallet setup at all. The name comes from `ferrum-node`,
+/// which is what creates it.
+pub const NODE_KEY_FILE: &str = ferrum_node::config::NODE_KEY_FILE;
 
 /// The environment variable that overrides the default datadir.
 pub const DATADIR_ENV: &str = "FERRUM_DATADIR";
@@ -37,10 +42,10 @@ pub const DATADIR_ENV: &str = "FERRUM_DATADIR";
 /// directory and says so.
 #[must_use]
 pub fn default_datadir() -> PathBuf {
-    if let Some(from_env) = std::env::var_os(DATADIR_ENV) {
-        if !from_env.is_empty() {
-            return PathBuf::from(from_env);
-        }
+    if let Some(from_env) = std::env::var_os(DATADIR_ENV)
+        && !from_env.is_empty()
+    {
+        return PathBuf::from(from_env);
     }
     directories::ProjectDirs::from("", "", "ferrum")
         .map(|dirs| dirs.data_dir().to_path_buf())

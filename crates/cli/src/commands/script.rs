@@ -325,7 +325,8 @@ mod tests {
         let oversized = "61".repeat(ferrum_script::MAX_SCRIPT_SIZE + 1);
         let out = run_args(&["script", "eval", "--script", &oversized]).unwrap();
         assert_eq!(out.bare.as_deref(), Some("false"));
-        assert!(out.json["error"].as_str().unwrap_or_default().contains("too large"));
+        let error = out.json["error"].as_str().unwrap_or_default();
+        assert!(error.contains("limit is 1000"), "{error}");
     }
 
     #[test]

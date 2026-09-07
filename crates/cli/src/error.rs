@@ -106,6 +106,19 @@ pub enum CliError {
     #[error(transparent)]
     Server(#[from] ferrum_rpc::RpcError),
 
+    /// `chaind`'s configuration would not resolve.
+    ///
+    /// Boxed: `ConfigError` names a field, a layer and a value, and is far
+    /// larger than every other variant. An unboxed one would make `CliError`
+    /// — and therefore every `CliResult` in the crate — pay for it on the
+    /// success path too.
+    #[error(transparent)]
+    Config(Box<ferrum_node::ConfigError>),
+
+    /// The node would not start, or failed while running.
+    #[error(transparent)]
+    Node(Box<ferrum_node::NodeError>),
+
     /// Something that should not happen, reported rather than panicked on.
     #[error("{0}")]
     Internal(String),
