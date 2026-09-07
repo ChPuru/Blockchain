@@ -303,8 +303,9 @@ impl NodeConfig {
 ///
 /// [`crate::NodeError::Io`] naming the directory.
 pub fn ensure_dir(dir: &Path) -> Result<(), crate::NodeError> {
-    std::fs::create_dir_all(dir)
-        .map_err(|e| crate::NodeError::io(format!("creating the data directory {}", dir.display()), e))
+    std::fs::create_dir_all(dir).map_err(|e| {
+        crate::NodeError::io(format!("creating the data directory {}", dir.display()), e)
+    })
 }
 
 #[cfg(test)]
@@ -381,7 +382,10 @@ mod tests {
     fn the_rpc_config_honours_the_websocket_switch() {
         let cfg = resolve::resolve(&CliOverrides::default(), &MapEnv::new(), None).unwrap();
         assert!(cfg.rpc_server_config().websocket);
-        let file = ConfigFile { rpc: file::RpcSection { ws: Some(false), ..Default::default() }, ..Default::default() };
+        let file = ConfigFile {
+            rpc: file::RpcSection { ws: Some(false), ..Default::default() },
+            ..Default::default()
+        };
         let cfg = resolve::resolve(&CliOverrides::default(), &MapEnv::new(), Some(&file)).unwrap();
         assert!(!cfg.rpc_server_config().websocket);
     }

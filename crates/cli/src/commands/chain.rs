@@ -120,10 +120,7 @@ pub fn reindex(ctx: &Context, dry_run: bool, network: &str) -> CliResult<Command
         )));
     }
 
-    let store = Arc::new(Store::open(
-        &db,
-        StoreConfig::indexed().with_chain_id(params.chain_id),
-    )?);
+    let store = Arc::new(Store::open(&db, StoreConfig::indexed().with_chain_id(params.chain_id))?);
     let engines = Arc::new(EngineRouter::new(params.clone())?);
     let chain = ChainManager::open(Arc::clone(&store), params.clone(), Arc::clone(&engines))?;
     let (tip_hash, tip_height) = chain.tip();
@@ -224,9 +221,8 @@ mod tests {
     fn a_dry_run_on_a_fresh_genesis_store_reports_nothing_to_replay() {
         let dir = tempfile::tempdir().unwrap();
         let params = ferrum_types::Network::Devnet.params();
-        let store = Arc::new(
-            Store::open(&paths::db_path(dir.path()), StoreConfig::indexed()).unwrap(),
-        );
+        let store =
+            Arc::new(Store::open(&paths::db_path(dir.path()), StoreConfig::indexed()).unwrap());
         let engines = Arc::new(EngineRouter::new(params.clone()).unwrap());
         let chain = ChainManager::open(store, params, engines).unwrap();
         chain.init_genesis().unwrap();
@@ -241,9 +237,8 @@ mod tests {
     fn a_real_reindex_of_a_genesis_only_store_preserves_the_state_root() {
         let dir = tempfile::tempdir().unwrap();
         let params = ferrum_types::Network::Devnet.params();
-        let store = Arc::new(
-            Store::open(&paths::db_path(dir.path()), StoreConfig::indexed()).unwrap(),
-        );
+        let store =
+            Arc::new(Store::open(&paths::db_path(dir.path()), StoreConfig::indexed()).unwrap());
         let engines = Arc::new(EngineRouter::new(params.clone()).unwrap());
         let chain = ChainManager::open(Arc::clone(&store), params, engines).unwrap();
         chain.init_genesis().unwrap();

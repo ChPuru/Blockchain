@@ -27,8 +27,7 @@ fn stdout_of(assert: &assert_cmd::assert::Assert) -> String {
 
 #[test]
 fn genesis_mine_prints_nonce_and_hash_on_its_last_line() {
-    let assert =
-        cli().args(["genesis", "mine", "--network", "devnet"]).assert().success();
+    let assert = cli().args(["genesis", "mine", "--network", "devnet"]).assert().success();
     let out = stdout_of(&assert);
     let last = out.lines().next_back().unwrap_or_default();
     assert!(last.starts_with("nonce="), "{out}");
@@ -45,8 +44,7 @@ fn the_mined_devnet_genesis_satisfies_its_own_target() {
         cli().args(["--json", "genesis", "mine", "--network", "devnet"]).assert().success();
     let json: Value = serde_json::from_slice(&assert.get_output().stdout).expect("json");
 
-    let hash =
-        BlockHash::from_hex(json["hash"].as_str().expect("a hash")).expect("valid hex");
+    let hash = BlockHash::from_hex(json["hash"].as_str().expect("a hash")).expect("valid hex");
     let bits = CompactTarget(
         u32::try_from(json["bits"].as_u64().expect("bits")).expect("bits fit in u32"),
     );

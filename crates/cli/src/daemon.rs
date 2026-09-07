@@ -276,11 +276,8 @@ mod tests {
     fn a_cli_flag_beats_a_config_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ferrum.toml");
-        std::fs::write(
-            &path,
-            "network = \"testnet\"\n[rpc]\nlisten = \"127.0.0.1:19999\"\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "network = \"testnet\"\n[rpc]\nlisten = \"127.0.0.1:19999\"\n")
+            .unwrap();
 
         let from_file = resolve(&args(&["--config", path.to_str().unwrap()])).unwrap();
         assert_eq!(from_file.network.name(), "testnet");

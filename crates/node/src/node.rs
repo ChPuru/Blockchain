@@ -130,9 +130,7 @@ impl Node {
         let chain = {
             let store = Arc::clone(&store);
             let engines = Arc::clone(&engines);
-            Arc::new(
-                blocking(move || ChainManager::open(store, params, engines)).await??,
-            )
+            Arc::new(blocking(move || ChainManager::open(store, params, engines)).await??)
         };
         {
             let chain = Arc::clone(&chain);
@@ -183,16 +181,8 @@ impl Node {
         ));
 
         // ---- p2p, sync, announce -------------------------------------------
-        let (handle, listen_addrs) = start_p2p(
-            &config,
-            keypair,
-            &relay,
-            &chain,
-            &bans,
-            &hints,
-            &cancel,
-            &mut handles,
-        )?;
+        let (handle, listen_addrs) =
+            start_p2p(&config, keypair, &relay, &chain, &bans, &hints, &cancel, &mut handles)?;
 
         let sync = Arc::new(SyncManager::new(
             Arc::clone(&relay),
@@ -214,8 +204,9 @@ impl Node {
         let p2p = Some(handle);
 
         // ---- rpc and explorer ----------------------------------------------
-        let mut ctx = NodeContext::new(Arc::new(ChainHandle::new(Arc::clone(&chain), config.index)))
-            .with_mempool(Arc::new(MempoolHandle::new(Arc::clone(&relay))));
+        let mut ctx =
+            NodeContext::new(Arc::new(ChainHandle::new(Arc::clone(&chain), config.index)))
+                .with_mempool(Arc::new(MempoolHandle::new(Arc::clone(&relay))));
         if let Some(handle) = &p2p {
             ctx = ctx.with_network(Arc::new(NetworkHandle::new(
                 handle.clone(),

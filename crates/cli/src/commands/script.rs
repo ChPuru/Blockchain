@@ -59,8 +59,7 @@ pub fn run(cmd: ScriptCmd) -> CliResult<CommandOutput> {
 
 /// Decode a hex string into a [`Script`].
 fn script_from_hex(what: &'static str, hex_text: &str) -> CliResult<Script> {
-    Script::from_hex(hex_text.trim())
-        .map_err(|e| CliError::invalid(what, hex_text, e.to_string()))
+    Script::from_hex(hex_text.trim()).map_err(|e| CliError::invalid(what, hex_text, e.to_string()))
 }
 
 /// Decode a hex string into a fixed-size array.
@@ -265,12 +264,7 @@ fn build_multisig(threshold: u8, pubkeys: &[String]) -> CliResult<CommandOutput>
 }
 
 /// `script build-htlc`.
-fn build_htlc(
-    hash: &str,
-    receiver: &str,
-    timeout: u32,
-    refund: &str,
-) -> CliResult<CommandOutput> {
+fn build_htlc(hash: &str, receiver: &str, timeout: u32, refund: &str) -> CliResult<CommandOutput> {
     let script = templates::htlc(
         &bytes20("--hash", hash)?,
         &bytes20("--receiver", receiver)?,
@@ -313,9 +307,8 @@ mod tests {
     #[test]
     fn arithmetic_runs_over_a_supplied_stack() {
         // OP_ADD over 2 and 3, pushed as stack elements, leaves 5.
-        let out =
-            run_args(&["script", "eval", "--script", "93", "--stack", "02", "--stack", "03"])
-                .unwrap();
+        let out = run_args(&["script", "eval", "--script", "93", "--stack", "02", "--stack", "03"])
+            .unwrap();
         assert_eq!(out.json["stack"], serde_json::json!(["05"]));
     }
 
@@ -336,8 +329,7 @@ mod tests {
 
     #[test]
     fn build_p2pkh_from_a_hash_classifies_as_p2pkh() {
-        let out =
-            run_args(&["script", "build-p2pkh", "--hash160", &"11".repeat(20)]).unwrap();
+        let out = run_args(&["script", "build-p2pkh", "--hash160", &"11".repeat(20)]).unwrap();
         assert_eq!(out.json["script_type"], "P2PKH");
         assert_eq!(out.json["size"], 25);
     }

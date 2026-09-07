@@ -94,7 +94,10 @@ pub async fn new(
             return Err(CliError::invalid(
                 "--datadir",
                 ctx.datadir.display().to_string(),
-                format!("a wallet already exists at {}; pass --force to replace it", path.display()),
+                format!(
+                    "a wallet already exists at {}; pass --force to replace it",
+                    path.display()
+                ),
             ));
         }
         std::fs::remove_file(&path).map_err(|e| CliError::io(&path, e))?;
@@ -143,7 +146,10 @@ pub fn restore(
             return Err(CliError::invalid(
                 "--datadir",
                 ctx.datadir.display().to_string(),
-                format!("a wallet already exists at {}; pass --force to replace it", path.display()),
+                format!(
+                    "a wallet already exists at {}; pass --force to replace it",
+                    path.display()
+                ),
             ));
         }
         std::fs::remove_file(&path).map_err(|e| CliError::io(&path, e))?;
@@ -272,8 +278,8 @@ pub async fn send(
     dry_run: bool,
     source: &PassphraseSource,
 ) -> CliResult<CommandOutput> {
-    let recipient = Address::decode(to)
-        .map_err(|e| CliError::invalid("--to", to, e.to_string()))?;
+    let recipient =
+        Address::decode(to).map_err(|e| CliError::invalid("--to", to, e.to_string()))?;
     let value = Amount::from_frm_str(amount)
         .map_err(|e| CliError::invalid("--amount", amount, e.to_string()))?;
 
@@ -305,10 +311,8 @@ pub async fn send(
     }
 
     let client = ctx.client()?;
-    let returned = client
-        .send_raw_transaction(hex_envelope)
-        .await
-        .map_err(rpc_err("sendrawtransaction"))?;
+    let returned =
+        client.send_raw_transaction(hex_envelope).await.map_err(rpc_err("sendrawtransaction"))?;
 
     Ok(CommandOutput::scalar("txid", returned.clone())
         .with_json(document)
@@ -357,8 +361,7 @@ async fn sync_from_node(ctx: &Context, wallet: &mut Wallet) -> CliResult<u64> {
 
     for address in addresses {
         let encoded = address.encode();
-        let rows =
-            client.list_unspent(encoded.clone()).await.map_err(rpc_err("listunspent"))?;
+        let rows = client.list_unspent(encoded.clone()).await.map_err(rpc_err("listunspent"))?;
         for row in rows {
             let out_point = parse_outpoint(&row.outpoint)?;
             // `listunspent` does not report coinbase-ness, and spending an
@@ -400,11 +403,10 @@ fn parse_outpoint(text: &str) -> CliResult<OutPoint> {
     let (txid, vout) = text
         .rsplit_once(':')
         .ok_or_else(|| CliError::invalid("outpoint", text, "expected <txid>:<vout>"))?;
-    let txid = Txid::from_hex(txid)
-        .map_err(|e| CliError::invalid("outpoint", text, e.to_string()))?;
-    let vout = vout
-        .parse::<u32>()
-        .map_err(|e| CliError::invalid("outpoint", text, e.to_string()))?;
+    let txid =
+        Txid::from_hex(txid).map_err(|e| CliError::invalid("outpoint", text, e.to_string()))?;
+    let vout =
+        vout.parse::<u32>().map_err(|e| CliError::invalid("outpoint", text, e.to_string()))?;
     Ok(OutPoint::new(txid, vout))
 }
 

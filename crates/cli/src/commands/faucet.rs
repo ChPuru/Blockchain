@@ -92,9 +92,10 @@ mod tests {
             rpc_url: "http://127.0.0.1:1".to_owned(),
             json: false,
         };
-        let err = request(&ctx, Some("not-an-address"), "http://127.0.0.1:1", &PassphraseSource::empty())
-            .await
-            .unwrap_err();
+        let err =
+            request(&ctx, Some("not-an-address"), "http://127.0.0.1:1", &PassphraseSource::empty())
+                .await
+                .unwrap_err();
         assert!(err.to_string().contains("--address"), "{err}");
     }
 }

@@ -43,10 +43,7 @@ fn stderr_of(assert: &assert_cmd::assert::Assert) -> String {
 #[test]
 fn wallet_new_prints_the_address_last_and_the_mnemonic_to_stderr() {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let assert = cli(dir.path())
-        .args(["wallet", "new", "--network", "devnet"])
-        .assert()
-        .success();
+    let assert = cli(dir.path()).args(["wallet", "new", "--network", "devnet"]).assert().success();
 
     let out = stdout_of(&assert);
     let address = out.lines().next_back().unwrap_or_default();
@@ -73,8 +70,7 @@ fn wallet_address_is_stable_across_calls_and_new_issues_a_different_one() {
     let again = stdout_of(&cli(dir.path()).args(["wallet", "address"]).assert().success());
     assert_eq!(first, again, "the current address must not rotate on every read");
 
-    let fresh =
-        stdout_of(&cli(dir.path()).args(["wallet", "address", "--new"]).assert().success());
+    let fresh = stdout_of(&cli(dir.path()).args(["wallet", "address", "--new"]).assert().success());
     assert_ne!(first, fresh, "--new must issue a different address");
 }
 
@@ -90,8 +86,7 @@ fn a_wallet_round_trips_through_new_and_restore() {
         .assert()
         .success();
     let created_out = stdout_of(&created);
-    let original =
-        created_out.lines().next_back().unwrap_or_default().trim().to_owned();
+    let original = created_out.lines().next_back().unwrap_or_default().trim().to_owned();
     assert!(original.starts_with("rfer1"), "{created_out}");
 
     // The secret went to the file, not to stdout.
@@ -135,11 +130,8 @@ fn a_passphrase_file_is_honoured_on_create_and_on_open() {
     let pass = dir.path().join("pass.txt");
     std::fs::write(&pass, b"correct horse battery staple\n").expect("write the passphrase");
 
-    let created = cli(dir.path())
-        .args(["wallet", "new", "--passphrase-file"])
-        .arg(&pass)
-        .assert()
-        .success();
+    let created =
+        cli(dir.path()).args(["wallet", "new", "--passphrase-file"]).arg(&pass).assert().success();
     let created_out = stdout_of(&created);
     let address = created_out.lines().next_back().unwrap_or_default().trim().to_owned();
 
@@ -151,13 +143,15 @@ fn a_passphrase_file_is_honoured_on_create_and_on_open() {
         .success();
     assert_eq!(stdout_of(&reopened).trim(), address);
 
-
     // ...and with the wrong passphrase it fails rather than silently creating
     // a second wallet.
     let wrong = dir.path().join("wrong.txt");
     std::fs::write(&wrong, b"hunter2\n").expect("write the wrong passphrase");
-    let failed =
-        cli(dir.path()).args(["wallet", "address", "--passphrase-file"]).arg(&wrong).assert().failure();
+    let failed = cli(dir.path())
+        .args(["wallet", "address", "--passphrase-file"])
+        .arg(&wrong)
+        .assert()
+        .failure();
     assert!(failed.get_output().stdout.is_empty());
 }
 
@@ -168,11 +162,8 @@ fn dump_pubkey_prints_64_hex_characters_as_its_last_line() {
 
     // Exactly what devnet/fork.sh does.
     cli(dir.path()).args(["wallet", "new", "--output"]).arg(&key_file).assert().success();
-    let assert = cli(dir.path())
-        .args(["wallet", "dump-pubkey", "--key"])
-        .arg(&key_file)
-        .assert()
-        .success();
+    let assert =
+        cli(dir.path()).args(["wallet", "dump-pubkey", "--key"]).arg(&key_file).assert().success();
 
     let out = stdout_of(&assert);
     let last = out.lines().next_back().unwrap_or_default();
@@ -186,11 +177,8 @@ fn dump_pubkey_also_reads_a_raw_hex_key_file() {
     let key_file = dir.path().join("raw.key");
     std::fs::write(&key_file, format!("{}\n", "11".repeat(32))).expect("write the key");
 
-    let assert = cli(dir.path())
-        .args(["wallet", "dump-pubkey", "--key"])
-        .arg(&key_file)
-        .assert()
-        .success();
+    let assert =
+        cli(dir.path()).args(["wallet", "dump-pubkey", "--key"]).arg(&key_file).assert().success();
     let last = stdout_of(&assert).lines().next_back().unwrap_or_default().to_owned();
     assert_eq!(last.len(), 64);
 }
@@ -198,10 +186,8 @@ fn dump_pubkey_also_reads_a_raw_hex_key_file() {
 #[test]
 fn dump_pubkey_on_a_missing_file_fails_with_a_message() {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let assert = cli(dir.path())
-        .args(["wallet", "dump-pubkey", "--key", "nowhere.key"])
-        .assert()
-        .failure();
+    let assert =
+        cli(dir.path()).args(["wallet", "dump-pubkey", "--key", "nowhere.key"]).assert().failure();
     assert!(assert.get_output().stdout.is_empty());
     assert!(!assert.get_output().stderr.is_empty());
 }

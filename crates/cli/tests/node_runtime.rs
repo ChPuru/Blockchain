@@ -115,15 +115,11 @@ async fn the_node_starts_mines_answers_rpc_and_shuts_down_cleanly() {
     node.shutdown().await.expect("a clean shutdown");
 
     // 7. The store was flushed: reopening finds at least the height reached.
-    let store =
-        ferrum_storage::Store::open(&store_path, ferrum_storage::StoreConfig::indexed())
-            .expect("the store reopens");
+    let store = ferrum_storage::Store::open(&store_path, ferrum_storage::StoreConfig::indexed())
+        .expect("the store reopens");
     let (_, reopened) = store.tip().expect("a readable tip").expect("a tip exists");
     assert!(reopened >= height, "reopened at {reopened}, was at {height}");
-    assert_eq!(
-        store.chain_id().expect("a chain id"),
-        Some(Network::Devnet.params().chain_id)
-    );
+    assert_eq!(store.chain_id().expect("a chain id"), Some(Network::Devnet.params().chain_id));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -172,10 +168,7 @@ async fn the_node_refuses_a_datadir_belonging_to_another_chain() {
         drop(store);
     }
 
-    assert!(
-        Node::start(config).await.is_err(),
-        "a mainnet datadir must not open as devnet"
-    );
+    assert!(Node::start(config).await.is_err(), "a mainnet datadir must not open as devnet");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -205,6 +198,82 @@ async fn a_forced_engine_reaches_the_router() {
     .expect("the node did not answer within 30s");
     assert_eq!(info.engine, "pow");
     assert!(info.finalized_height.is_none(), "nothing is ever final under proof of work");
+
+    node.shutdown().await.expect("a clean shutdown");
+}
+
+/// An HTTP/1.1 GET against a localhost listener, returning the raw response.
+///
+/// The explorer is REST, not JSON-RPC, so `jsonrpsee` cannot reach it and this
+/// crate has no HTTP client in its dev-dependencies. Twenty lines of raw socket
+/// beats adding one to assert on two routes.
+///
+/// The socket work runs on a blocking thread: these are `#[tokio::test]`s, so a
+/// blocking read on the runtime's own worker would stop the very server task
+/// that has to answer it.
+async fn http_get(addr: std::net::SocketAddr, path: &str) -> String {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || http_get_blocking(addr, &path))
+        .await
+        .expect("the request thread does not panic")
+}
+
+/// The socket half of [`http_get`], run on a blocking thread.
+fn http_get_blocking(addr: std::net::SocketAddr, path: &str) -> String {
+    use std::io::{Read as _, Write as _};
+
+    let mut stream = std::net::TcpStream::connect(addr).expect("the explorer is listening");
+    stream.set_read_timeout(Some(Duration::from_secs(10))).expect("a readable timeout");
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+        .expect("the request is written");
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).expect("the response is read");
+    raw
+}
+
+#[tokio::test]
+async fn the_faucet_flag_reaches_the_explorer() {
+    // The regression. `explorer.faucet` resolves to true on devnet, and used to
+    // reach nothing: `NodeContext` was built without ever calling
+    // `with_faucet`, so `POST /api/faucet` answered "faucet disabled" on every
+    // network no matter what the flag, the config file or the default said.
+    let dir = tempfile::tempdir().expect("a temp datadir");
+    let config = devnet_config(dir.path(), false);
+    assert!(config.faucet, "devnet defaults the faucet on");
+
+    let node = Node::start(config).await.expect("the node starts");
+    let faucet_address = node
+        .faucet_address()
+        .expect("a node with the faucet on names its funding address")
+        .to_owned();
+    assert!(faucet_address.starts_with("rfer1"), "a devnet address: {faucet_address}");
+
+    let explorer = node.explorer_addr().expect("the node bound its explorer listener");
+    let stats = http_get(explorer, "/api/stats").await;
+    assert!(stats.contains("200 OK"), "stats answered: {stats}");
+    assert!(
+        stats.contains("\"faucet_enabled\":true"),
+        "the explorer must advertise the faucet it was configured with: {stats}"
+    );
+
+    node.shutdown().await.expect("a clean shutdown");
+}
+
+#[tokio::test]
+async fn the_faucet_can_be_turned_off() {
+    let dir = tempfile::tempdir().expect("a temp datadir");
+    let mut config = devnet_config(dir.path(), false);
+    config.faucet = false;
+
+    let node = Node::start(config).await.expect("the node starts");
+    assert!(node.faucet_address().is_none(), "no faucet, no funding address");
+
+    let explorer = node.explorer_addr().expect("the node bound its explorer listener");
+    let stats = http_get(explorer, "/api/stats").await;
+    assert!(
+        stats.contains("\"faucet_enabled\":false"),
+        "a node without a faucet must say so: {stats}"
+    );
 
     node.shutdown().await.expect("a clean shutdown");
 }

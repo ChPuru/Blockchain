@@ -118,6 +118,22 @@ impl NodeKeyFaucetSource {
 
 impl FaucetSource for NodeKeyFaucetSource {
     fn build_payment(&self, to: &Address, amount: Amount) -> Result<Transaction, RpcError> {
+        // The REST handler parses the address for this network before it ever
+        // reaches a source, so this is defence in depth — but it is worth
+        // having: a P2PKH `script_pubkey` is byte-identical across networks
+        // (only the bech32 HRP differs), so without this check a mainnet
+        // address would silently be paid as if it were a devnet one, and the
+        // requester would be told a transaction they cannot find was sent.
+        if to.network != self.address.network {
+            return Err(RpcError::new(
+                RpcErrorCode::InvalidAddress,
+                format!(
+                    "that is a {} address; this faucet pays {}",
+                    to.network, self.address.network
+                ),
+            ));
+        }
+
         let (_, tip_height) = self.chain.tip()?;
         let candidates = self.spendable(tip_height)?;
         if candidates.is_empty() {

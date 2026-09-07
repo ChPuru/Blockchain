@@ -116,11 +116,9 @@ pub fn init_tracing(format: LogFormat) -> Result<bool, NodeError> {
     };
 
     let installed = match format {
-        LogFormat::Text => tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_target(true)
-            .try_init()
-            .is_ok(),
+        LogFormat::Text => {
+            tracing_subscriber::fmt().with_env_filter(filter).with_target(true).try_init().is_ok()
+        }
         LogFormat::Json => tracing_subscriber::fmt()
             .json()
             .with_env_filter(filter)
@@ -156,9 +154,7 @@ pub const REORG_LOG_NEEDLES: &[&str] = &["reorg", "disconnect", "rolled back", "
 /// installing a subscriber and capturing its output.
 #[must_use]
 pub fn reorg_line(disconnected: usize, connected: usize) -> String {
-    format!(
-        "reorg complete: rolled back {disconnected} block(s), connected {connected}, new tip"
-    )
+    format!("reorg complete: rolled back {disconnected} block(s), connected {connected}, new tip")
 }
 
 // ---------------------------------------------------------------------------

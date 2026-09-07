@@ -293,11 +293,12 @@ async fn the_best_peer_is_the_one_with_the_most_work() {
     mine_blocks(&long, 3, 9);
 
     let (a, b) = (PeerId::random(), PeerId::random());
-    let network = Arc::new(
-        Loopback::new()
-            .with(a, Arc::clone(&short.chain), Behaviour::Honest)
-            .with(b, Arc::clone(&long.chain), Behaviour::Honest),
-    );
+    let network =
+        Arc::new(Loopback::new().with(a, Arc::clone(&short.chain), Behaviour::Honest).with(
+            b,
+            Arc::clone(&long.chain),
+            Behaviour::Honest,
+        ));
     let sync = manager(&local, network);
     let (best, tip) = sync.best_peer(&[a, b]).await.unwrap();
     assert_eq!(best, b);
@@ -414,11 +415,12 @@ async fn a_window_larger_than_one_request_is_split_across_peers() {
     local.clock.set(base_time() + 70 * 120_000);
 
     let (a, b) = (PeerId::random(), PeerId::random());
-    let network = Arc::new(
-        Loopback::new()
-            .with(a, Arc::clone(&remote.chain), Behaviour::Honest)
-            .with(b, Arc::clone(&remote.chain), Behaviour::Honest),
-    );
+    let network =
+        Arc::new(Loopback::new().with(a, Arc::clone(&remote.chain), Behaviour::Honest).with(
+            b,
+            Arc::clone(&remote.chain),
+            Behaviour::Honest,
+        ));
     let sync = manager(&local, network);
 
     let stats = sync.sync_to_best_peer(&[a, b]).await.unwrap();
@@ -437,9 +439,8 @@ async fn a_window_download_returns_blocks_in_the_order_asked_for() {
         Arc::new(Loopback::new().with(peer, Arc::clone(&remote.chain), Behaviour::Honest));
     let sync = manager(&local, network);
 
-    let wanted: Vec<BlockHash> = (1..=6u64)
-        .map(|h| remote.chain.store().hash_at_height(h).unwrap().unwrap())
-        .collect();
+    let wanted: Vec<BlockHash> =
+        (1..=6u64).map(|h| remote.chain.store().hash_at_height(h).unwrap().unwrap()).collect();
     let served = sync.download_window(&[peer], peer, &wanted).await.unwrap();
     assert_eq!(served.len(), 6);
     for (entry, hash) in served.iter().zip(&wanted) {

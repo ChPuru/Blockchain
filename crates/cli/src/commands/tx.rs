@@ -94,7 +94,8 @@ fn describe(tx: &Transaction, txid: &Txid) -> serde_json::Value {
 /// so a typo is caught without a round trip.
 pub async fn send(ctx: &Context, hex_text: &str) -> CliResult<CommandOutput> {
     let cleaned = hex_text.trim().trim_start_matches("0x").to_owned();
-    let raw = hex::decode(&cleaned).map_err(|e| CliError::invalid("tx", hex_text, e.to_string()))?;
+    let raw =
+        hex::decode(&cleaned).map_err(|e| CliError::invalid("tx", hex_text, e.to_string()))?;
     Transaction::decode_envelope(&raw)
         .map_err(|e| CliError::invalid("tx", hex_text, e.to_string()))?;
 
@@ -110,8 +111,8 @@ pub async fn send(ctx: &Context, hex_text: &str) -> CliResult<CommandOutput> {
 /// [`CliError::Invalid`] for a malformed txid and [`CliError::Rpc`] when the
 /// node does not have it.
 pub async fn get(ctx: &Context, txid: &str, raw: bool) -> CliResult<CommandOutput> {
-    let parsed = Txid::from_hex(txid.trim())
-        .map_err(|e| CliError::invalid("txid", txid, e.to_string()))?;
+    let parsed =
+        Txid::from_hex(txid.trim()).map_err(|e| CliError::invalid("txid", txid, e.to_string()))?;
     let client = ctx.client()?;
     let result = client
         .get_raw_transaction(parsed.to_string(), Some(!raw))

@@ -67,9 +67,8 @@ async fn a_peer_serving_a_block_that_does_not_match_its_header_is_banned() {
     // The header still hashes to what we asked for — only the body was
     // tampered with — so this is caught by the merkle-root rule at connect
     // time, and the peer that served it is named.
-    let wanted: Vec<BlockHash> = (1..=3u64)
-        .map(|h| remote.chain.store().hash_at_height(h).unwrap().unwrap())
-        .collect();
+    let wanted: Vec<BlockHash> =
+        (1..=3u64).map(|h| remote.chain.store().hash_at_height(h).unwrap().unwrap()).collect();
     let served = sync.download_window(&[peer], peer, &wanted).await.unwrap();
     assert_eq!(served.len(), 3);
     let e = sync.connect_served(served).await.unwrap_err();
@@ -106,13 +105,14 @@ async fn a_peer_serving_a_block_nobody_asked_for_is_banned() {
     mine_blocks(&remote, 2, 3);
 
     let peer = PeerId::random();
-    let network = Arc::new(
-        Loopback::new().with(peer, Arc::clone(&remote.chain), Behaviour::UnrequestedBlock),
-    );
+    let network = Arc::new(Loopback::new().with(
+        peer,
+        Arc::clone(&remote.chain),
+        Behaviour::UnrequestedBlock,
+    ));
     let sync = manager(&local, Arc::clone(&network));
 
-    let wanted: Vec<BlockHash> =
-        vec![remote.chain.store().hash_at_height(1).unwrap().unwrap()];
+    let wanted: Vec<BlockHash> = vec![remote.chain.store().hash_at_height(1).unwrap().unwrap()];
     let e = sync.download_window(&[peer], peer, &wanted).await.unwrap_err();
     match &e {
         NodeError::PeerMisbehaved { what, reason, .. } => {

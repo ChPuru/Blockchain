@@ -47,7 +47,10 @@ fn a_consensus_invalid_block_is_rejected_so_the_sender_is_scored() {
     let invalid: Result<AcceptOutcome, ChainError> =
         Err(ChainError::Consensus(ConsensusError::ZeroTarget));
     assert_eq!(block_verdict(&invalid), GossipVerdict::Reject);
-    assert_eq!(block_rejection(&ChainError::Consensus(ConsensusError::ZeroTarget)), BlockRejection::Invalid);
+    assert_eq!(
+        block_rejection(&ChainError::Consensus(ConsensusError::ZeroTarget)),
+        BlockRejection::Invalid
+    );
 
     let known: Result<AcceptOutcome, ChainError> = Err(ChainError::KnownInvalid(hash(3)));
     assert_eq!(block_verdict(&known), GossipVerdict::Reject);
@@ -59,8 +62,7 @@ fn our_own_storage_failure_never_scores_the_sender() {
     assert_eq!(block_verdict(&ours), GossipVerdict::Ignore);
     assert_eq!(block_rejection(&ChainError::NoTip), BlockRejection::Transient);
 
-    let disk: Result<AcceptOutcome, ChainError> =
-        Err(ChainError::Storage(StorageError::NoTip));
+    let disk: Result<AcceptOutcome, ChainError> = Err(ChainError::Storage(StorageError::NoTip));
     assert_eq!(block_verdict(&disk), GossipVerdict::Ignore);
 }
 
@@ -87,10 +89,7 @@ fn an_accepted_transaction_is_accepted() {
 #[test]
 fn a_held_or_duplicate_transaction_is_ignored() {
     let id = Txid(ferrum_types::Hash32::ZERO);
-    assert_eq!(
-        tx_verdict(&Ok(AcceptResult::AlreadyInPool { txid: id })),
-        GossipVerdict::Ignore
-    );
+    assert_eq!(tx_verdict(&Ok(AcceptResult::AlreadyInPool { txid: id })), GossipVerdict::Ignore);
     assert_eq!(
         tx_verdict(&Ok(AcceptResult::Orphan { txid: id, missing: Vec::new() })),
         GossipVerdict::Ignore

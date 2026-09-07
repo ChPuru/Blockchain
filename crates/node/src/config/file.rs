@@ -192,8 +192,8 @@ impl ConsensusFile {
         let mut out = Vec::with_capacity(self.bft_validators.len());
         for entry in &self.bft_validators {
             let trimmed = entry.strip_prefix("0x").unwrap_or(entry);
-            let bytes = hex::decode(trimmed)
-                .map_err(|_| ConfigError::ValidatorKey(entry.clone()))?;
+            let bytes =
+                hex::decode(trimmed).map_err(|_| ConfigError::ValidatorKey(entry.clone()))?;
             let array: [u8; 32] =
                 bytes.try_into().map_err(|_| ConfigError::ValidatorKey(entry.clone()))?;
             out.push(ferrum_types::ValidatorId(array));

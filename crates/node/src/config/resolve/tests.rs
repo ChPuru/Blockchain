@@ -109,14 +109,8 @@ fn the_full_chain_holds_for_one_field() {
     let cli = CliOverrides { rpc_listen: Some("127.0.0.1:1111".to_owned()), ..Default::default() };
 
     assert_eq!(cfg(cli.clone(), env.clone(), Some(file.clone())).rpc_listen.port(), 1111);
-    assert_eq!(
-        cfg(CliOverrides::default(), env, Some(file.clone())).rpc_listen.port(),
-        2222
-    );
-    assert_eq!(
-        cfg(CliOverrides::default(), MapEnv::new(), Some(file)).rpc_listen.port(),
-        3333
-    );
+    assert_eq!(cfg(CliOverrides::default(), env, Some(file.clone())).rpc_listen.port(), 2222);
+    assert_eq!(cfg(CliOverrides::default(), MapEnv::new(), Some(file)).rpc_listen.port(), 3333);
     assert_eq!(cfg(CliOverrides::default(), MapEnv::new(), None).rpc_listen.port(), 8645);
 }
 
@@ -124,10 +118,7 @@ fn the_full_chain_holds_for_one_field() {
 fn precedence_is_per_field_not_per_layer() {
     // The file sets the explorer; the flag sets metrics. Both must survive.
     let file = ConfigFile {
-        explorer: ExplorerSection {
-            listen: Some("0.0.0.0:9999".to_owned()),
-            ..Default::default()
-        },
+        explorer: ExplorerSection { listen: Some("0.0.0.0:9999".to_owned()), ..Default::default() },
         ..Default::default()
     };
     let c = cfg(
@@ -149,8 +140,12 @@ fn the_network_itself_follows_the_same_precedence() {
         Network::Mainnet
     );
     assert_eq!(
-        cfg(CliOverrides::default(), MapEnv::new().with(ENV_NETWORK, "testnet"), Some(file.clone()))
-            .network,
+        cfg(
+            CliOverrides::default(),
+            MapEnv::new().with(ENV_NETWORK, "testnet"),
+            Some(file.clone())
+        )
+        .network,
         Network::Testnet
     );
     assert_eq!(
@@ -209,13 +204,15 @@ fn the_environment_can_switch_mining_off_against_the_file() {
 
 #[test]
 fn the_index_flag_follows_the_same_rule() {
-    let file = ConfigFile {
-        index: IndexSection { transactions: Some(true) },
-        ..Default::default()
-    };
+    let file =
+        ConfigFile { index: IndexSection { transactions: Some(true) }, ..Default::default() };
     assert!(cfg(CliOverrides::default(), MapEnv::new(), Some(file.clone())).index);
-    assert!(!cfg(CliOverrides::default(), MapEnv::new().with(ENV_INDEX, "false"), Some(file)).index);
-    assert!(cfg(CliOverrides { index: Some(true), ..Default::default() }, MapEnv::new(), None).index);
+    assert!(
+        !cfg(CliOverrides::default(), MapEnv::new().with(ENV_INDEX, "false"), Some(file)).index
+    );
+    assert!(
+        cfg(CliOverrides { index: Some(true), ..Default::default() }, MapEnv::new(), None).index
+    );
 }
 
 #[test]
@@ -232,7 +229,10 @@ fn peers_come_from_exactly_one_layer_never_a_merge() {
         ..Default::default()
     };
     let c = cfg(
-        CliOverrides { peers: Some(vec!["/ip4/127.0.0.1/tcp/8656".to_owned()]), ..Default::default() },
+        CliOverrides {
+            peers: Some(vec!["/ip4/127.0.0.1/tcp/8656".to_owned()]),
+            ..Default::default()
+        },
         MapEnv::new(),
         Some(file),
     );
@@ -354,9 +354,8 @@ fn an_unknown_network_is_refused() {
 
 #[test]
 fn a_boolean_typo_is_refused_rather_than_read_as_false() {
-    let e =
-        resolve(&CliOverrides::default(), &MapEnv::new().with(ENV_MINE, "maybe"), None)
-            .unwrap_err();
+    let e = resolve(&CliOverrides::default(), &MapEnv::new().with(ENV_MINE, "maybe"), None)
+        .unwrap_err();
     assert!(matches!(e, ConfigError::Invalid { .. }), "{e}");
 }
 
@@ -364,7 +363,11 @@ fn a_boolean_typo_is_refused_rather_than_read_as_false() {
 fn a_mine_address_for_another_network_is_refused() {
     let (_, text) = devnet_address();
     let e = resolve(
-        &CliOverrides { network: Some("mainnet".to_owned()), mine_address: Some(text), ..Default::default() },
+        &CliOverrides {
+            network: Some("mainnet".to_owned()),
+            mine_address: Some(text),
+            ..Default::default()
+        },
         &MapEnv::new(),
         None,
     )
@@ -439,10 +442,7 @@ fn an_empty_consensus_file_changes_nothing() {
 #[test]
 fn the_faucet_amount_is_parsed_as_an_integer_count_of_grains() {
     let file = ConfigFile {
-        explorer: ExplorerSection {
-            faucet_amount: Some("1.5".to_owned()),
-            ..Default::default()
-        },
+        explorer: ExplorerSection { faucet_amount: Some("1.5".to_owned()), ..Default::default() },
         ..Default::default()
     };
     let c = cfg(CliOverrides::default(), MapEnv::new(), Some(file));

@@ -58,12 +58,7 @@ fn daemon() -> Command {
 #[test]
 fn every_chain_cli_subcommand_renders_its_help() {
     for argv in CHAIN_CLI_HELP {
-        cli()
-            .args(*argv)
-            .assert()
-            .success()
-            .stdout(contains("Usage"))
-            .stdout(contains("--help"));
+        cli().args(*argv).assert().success().stdout(contains("Usage")).stdout(contains("--help"));
     }
 }
 

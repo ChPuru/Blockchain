@@ -139,11 +139,8 @@ fn a_matured_chain_builds_a_signed_payment() {
 
     // Change, when there is any, comes back to the faucet rather than leaking
     // to the miner as fee.
-    let change = tx
-        .outputs
-        .iter()
-        .filter(|o| o.script_pubkey == src.address().script_pubkey())
-        .count();
+    let change =
+        tx.outputs.iter().filter(|o| o.script_pubkey == src.address().script_pubkey()).count();
     assert!(change <= 1);
 
     // Every input is signed and verifies through the real interpreter against
@@ -165,11 +162,8 @@ fn a_payment_signed_for_devnet_does_not_verify_on_mainnet() {
     let (_, provider) = chain_with(params.coinbase_maturity + 2);
     let src = source(Arc::clone(&provider));
     let tx = src.build_payment(&recipient(), Amount::from_grains(100_000_000)).unwrap();
-    let prevouts: Vec<Coin> = tx
-        .inputs
-        .iter()
-        .map(|i| provider.coin(&i.prev_out).unwrap().unwrap())
-        .collect();
+    let prevouts: Vec<Coin> =
+        tx.inputs.iter().map(|i| provider.coin(&i.prev_out).unwrap().unwrap()).collect();
     assert!(ferrum_wallet::verify_signed(&tx, &prevouts, ChainParams::mainnet().chain_id).is_err());
 }
 

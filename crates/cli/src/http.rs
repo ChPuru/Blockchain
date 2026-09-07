@@ -121,9 +121,9 @@ pub async fn post_json(target: &HttpTarget, body: &str) -> CliResult<(u16, Strin
         Ok::<Vec<u8>, std::io::Error>(raw)
     };
 
-    let raw = tokio::time::timeout(TIMEOUT, exchange)
-        .await
-        .map_err(|_| CliError::internal(format!("{}:{} did not answer in time", target.host, target.port)))??;
+    let raw = tokio::time::timeout(TIMEOUT, exchange).await.map_err(|_| {
+        CliError::internal(format!("{}:{} did not answer in time", target.host, target.port))
+    })??;
 
     parse_response(&raw)
 }
@@ -149,9 +149,7 @@ pub fn parse_response(raw: &[u8]) -> CliResult<(u16, String)> {
         .split_whitespace()
         .nth(1)
         .and_then(|c| c.parse().ok())
-        .ok_or_else(|| {
-            CliError::invalid("http response", status_line, "no status code")
-        })?;
+        .ok_or_else(|| CliError::invalid("http response", status_line, "no status code"))?;
 
     if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
         return Err(CliError::invalid(

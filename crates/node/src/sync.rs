@@ -48,9 +48,7 @@ use ferrum_types::{Block, BlockHash, BlockHeader};
 use tokio_util::sync::CancellationToken;
 
 pub use self::network::{P2pNetwork, PeerBans, SyncNetwork};
-pub use self::types::{
-    HeaderBatch, ServedBlock, SyncRound, SyncStats, header_failure_is_bannable,
-};
+pub use self::types::{HeaderBatch, ServedBlock, SyncRound, SyncStats, header_failure_is_bannable};
 use crate::error::NodeError;
 use crate::relay::{GossipVerdict, Relay};
 
@@ -218,20 +216,19 @@ impl SyncManager {
     ) -> Result<SyncRound, NodeError> {
         // ---- phase 1: headers ---------------------------------------------
         let locator = self.locator().await?;
-        let headers = self
-            .network
-            .request_headers(header_peer, locator, None, HEADERS_PER_REQUEST)
-            .await?;
+        let headers =
+            self.network.request_headers(header_peer, locator, None, HEADERS_PER_REQUEST).await?;
         if headers.is_empty() {
             return Ok(SyncRound::NoHeaders);
         }
         if headers.len() > HEADERS_PER_REQUEST as usize {
             // The server caps at 2000; a peer that ignores its own cap is
             // trying to make us allocate.
-            return Err(self.misbehaved(header_peer, "header batch", format!(
-                "{} headers, cap is {HEADERS_PER_REQUEST}",
-                headers.len()
-            )));
+            return Err(self.misbehaved(
+                header_peer,
+                "header batch",
+                format!("{} headers, cap is {HEADERS_PER_REQUEST}", headers.len()),
+            ));
         }
         let batch = self.accept_headers(header_peer, headers).await?;
         self.relay.metrics().headers_accepted(batch.accepted);
@@ -519,9 +516,7 @@ impl SyncManager {
 
         match outcome {
             Ok(n) => Ok(n),
-            Err((hash, reason)) => {
-                Err(self.misbehaved(peer, "block", format!("{hash}: {reason}")))
-            }
+            Err((hash, reason)) => Err(self.misbehaved(peer, "block", format!("{hash}: {reason}"))),
         }
     }
 

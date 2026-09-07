@@ -336,8 +336,12 @@ fn the_contract_paging_view_agrees_with_the_exact_walk() {
     }
     let key = pkh(0);
     let paged = s.address_history(&key, 0, 1000).unwrap();
-    let exact: Vec<_> =
-        s.address_history_after(&key, None, 1000).unwrap().into_iter().map(|(h, _, id)| (h, id)).collect();
+    let exact: Vec<_> = s
+        .address_history_after(&key, None, 1000)
+        .unwrap()
+        .into_iter()
+        .map(|(h, _, id)| (h, id))
+        .collect();
     assert_eq!(paged, exact);
 }
 

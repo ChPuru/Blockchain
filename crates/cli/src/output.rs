@@ -47,11 +47,7 @@ impl CommandOutput {
     #[must_use]
     pub fn scalar(key: &str, value: impl Into<String>) -> Self {
         let value = value.into();
-        CommandOutput {
-            json: json!({ key: value }),
-            human: Vec::new(),
-            bare: Some(value),
-        }
+        CommandOutput { json: json!({ key: value }), human: Vec::new(), bare: Some(value) }
     }
 
     /// An output carrying a JSON document and no bare value.

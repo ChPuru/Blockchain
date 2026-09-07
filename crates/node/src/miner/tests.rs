@@ -18,8 +18,7 @@ fn devnet_relay() -> (Arc<Relay>, Arc<ChainManager>, Arc<FixedClock>) {
     let params = ChainParams::devnet();
     let store = Arc::new(Store::open_in_memory(StoreConfig::default()).unwrap());
     let engines = Arc::new(EngineRouter::new(params.clone()).unwrap());
-    let chain =
-        Arc::new(ChainManager::open(Arc::clone(&store), params.clone(), engines).unwrap());
+    let chain = Arc::new(ChainManager::open(Arc::clone(&store), params.clone(), engines).unwrap());
     chain.init_genesis().unwrap();
     let mempool = Arc::new(Mempool::new(MempoolConfig::new(params.clone())));
     let clock = Arc::new(FixedClock::new(params.genesis_timestamp_ms + 120_000));
@@ -103,8 +102,7 @@ fn the_miner_climbs_several_blocks() {
     let (miner, chain, clock) = miner();
     for i in 1..=5u64 {
         clock.set(ChainParams::devnet().genesis_timestamp_ms + i * 120_000);
-        let (block, outcome) =
-            miner.mine_and_submit(&AtomicBool::new(false)).unwrap().unwrap();
+        let (block, outcome) = miner.mine_and_submit(&AtomicBool::new(false)).unwrap().unwrap();
         assert!(outcome.should_announce(), "{outcome:?}");
         assert_eq!(chain.tip().0, ferrum_storage::header_hash(&block.header));
         assert_eq!(chain.tip().1, i);

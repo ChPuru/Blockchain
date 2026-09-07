@@ -119,10 +119,7 @@ impl BlockRelayOutcome {
     /// Whether this node should announce the block onwards.
     #[must_use]
     pub fn should_announce(&self) -> bool {
-        matches!(
-            self.outcome,
-            Some(AcceptOutcome::Extended(_) | AcceptOutcome::Reorged { .. })
-        )
+        matches!(self.outcome, Some(AcceptOutcome::Extended(_) | AcceptOutcome::Reorged { .. }))
     }
 }
 
@@ -163,9 +160,11 @@ impl TxRelayOutcome {
 #[must_use]
 pub fn block_verdict(result: &Result<AcceptOutcome, ChainError>) -> GossipVerdict {
     match result {
-        Ok(AcceptOutcome::Extended(_) | AcceptOutcome::Reorged { .. } | AcceptOutcome::SideChain(_)) => {
-            GossipVerdict::Accept
-        }
+        Ok(
+            AcceptOutcome::Extended(_)
+            | AcceptOutcome::Reorged { .. }
+            | AcceptOutcome::SideChain(_),
+        ) => GossipVerdict::Accept,
         // Already had it, or cannot judge it yet. Neither says anything about
         // the sender, and gossipsub's duplicate cache already handles the
         // first case.
@@ -431,8 +430,7 @@ impl Relay {
             }
         };
 
-        let result =
-            self.mempool.accept(tx, self.chain.store().as_ref(), height, mtp_s);
+        let result = self.mempool.accept(tx, self.chain.store().as_ref(), height, mtp_s);
         let verdict = tx_verdict(&result);
         match result {
             Ok(accepted) => {
@@ -515,12 +513,7 @@ impl Relay {
             hashes.iter().filter_map(|h| store.get_block(h).ok().flatten()).collect()
         };
         let (_, height) = self.chain.tip();
-        self.mempool.reconcile_reorg(
-            &load(disconnected),
-            &load(connected),
-            store.as_ref(),
-            height,
-        );
+        self.mempool.reconcile_reorg(&load(disconnected), &load(connected), store.as_ref(), height);
     }
 
     /// Refresh the gauges that follow the tip.

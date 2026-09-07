@@ -261,9 +261,7 @@ mod tests {
             "validator-key",
             "log-format",
         ] {
-            let found = NodeArgs::command()
-                .get_arguments()
-                .any(|a| a.get_long() == Some(flag));
+            let found = NodeArgs::command().get_arguments().any(|a| a.get_long() == Some(flag));
             assert!(found, "chaind is missing --{flag}");
         }
     }

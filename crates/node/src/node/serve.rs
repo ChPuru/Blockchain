@@ -130,8 +130,7 @@ mod tests {
             Arc::new(NodeMetrics::new()),
             Arc::clone(&clock) as Arc<dyn Clock>,
         ));
-        let payout =
-            resolve_payout(None, &NodeKey::from_seed([3u8; 32]), params.network).unwrap();
+        let payout = resolve_payout(None, &NodeKey::from_seed([3u8; 32]), params.network).unwrap();
         let miner = Miner::new(relay, payout);
         for i in 1..=blocks {
             clock.set(params.genesis_timestamp_ms + i * 120_000);
@@ -205,9 +204,8 @@ mod tests {
     #[test]
     fn bodies_come_back_in_the_order_asked_for() {
         let chain = chain_with(4);
-        let wanted: Vec<BlockHash> = (1..=4u64)
-            .map(|h| chain.store().hash_at_height(h).unwrap().unwrap())
-            .collect();
+        let wanted: Vec<BlockHash> =
+            (1..=4u64).map(|h| chain.store().hash_at_height(h).unwrap().unwrap()).collect();
         let blocks = bodies(&chain, &wanted);
         assert_eq!(blocks.len(), 4);
         for (block, hash) in blocks.iter().zip(&wanted) {

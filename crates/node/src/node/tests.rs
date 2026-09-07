@@ -74,7 +74,10 @@ fn forcing_pow_pins_every_height() {
     config.consensus = Some(crate::config::EngineChoice::Pow);
     let router = build_engines(&config).unwrap();
     assert_eq!(router.forced(), Some(ferrum_types::BlockSeal::ENGINE_POW));
-    assert_eq!(router.engine_for_height(1_000_000).engine_id(), ferrum_types::BlockSeal::ENGINE_POW);
+    assert_eq!(
+        router.engine_for_height(1_000_000).engine_id(),
+        ferrum_types::BlockSeal::ENGINE_POW
+    );
 }
 
 #[test]
@@ -160,10 +163,7 @@ fn a_validator_key_may_also_be_a_mnemonic() {
 fn a_hex_validator_key_and_a_mnemonic_are_told_apart() {
     let path = Path::new("validator.key");
     // 64 hex characters is never a mnemonic.
-    assert_eq!(
-        parse_validator_key(&"ab".repeat(32), path).unwrap().to_bytes(),
-        [0xabu8; 32]
-    );
+    assert_eq!(parse_validator_key(&"ab".repeat(32), path).unwrap().to_bytes(), [0xabu8; 32]);
     // A mnemonic is never valid hex.
     let phrase = "legal winner thank year wave sausage worth useful legal winner thank yellow";
     assert!(parse_validator_key(phrase, path).is_ok());
@@ -329,8 +329,5 @@ fn a_mine_address_for_the_wrong_network_never_reaches_the_miner() {
     let key = NodeKey::from_seed([5u8; 32]);
     let mainnet = key.mining_address(Network::Mainnet).unwrap();
     let e = resolve_payout(Some(&mainnet), &key, config.network).unwrap_err();
-    assert!(
-        matches!(e, NodeError::Config(ConfigError::AddressNetworkMismatch { .. })),
-        "{e}"
-    );
+    assert!(matches!(e, NodeError::Config(ConfigError::AddressNetworkMismatch { .. })), "{e}");
 }

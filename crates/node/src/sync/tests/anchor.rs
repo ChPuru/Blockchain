@@ -55,7 +55,12 @@ async fn a_header_batch_reports_only_the_bodies_we_still_need() {
 
     // Offer the same headers again: we have every body, so nothing is wanted.
     let headers = network
-        .request_headers(peer, vec![local.chain.store().hash_at_height(0).unwrap().unwrap()], None, HEADERS_PER_REQUEST)
+        .request_headers(
+            peer,
+            vec![local.chain.store().hash_at_height(0).unwrap().unwrap()],
+            None,
+            HEADERS_PER_REQUEST,
+        )
         .await
         .unwrap();
     let batch = sync.accept_headers(peer, headers).await.unwrap();

@@ -62,10 +62,10 @@ pub struct LoadedKey {
 /// never quotes the file's contents.
 pub fn load_key_file(path: &Path, network: Network) -> CliResult<LoadedKey> {
     let raw = std::fs::read(path).map_err(|e| CliError::io(path, e))?;
-    let text = Zeroizing::new(
-        String::from_utf8(raw)
-            .map_err(|_| CliError::invalid("--key", path.display().to_string(), "not valid UTF-8"))?,
-    );
+    let text =
+        Zeroizing::new(String::from_utf8(raw).map_err(|_| {
+            CliError::invalid("--key", path.display().to_string(), "not valid UTF-8")
+        })?);
     parse_key_material(text.trim(), network)
         .map_err(|reason| CliError::invalid("--key", path.display().to_string(), reason))
 }
@@ -88,8 +88,9 @@ fn parse_key_material(text: &str, network: Network) -> Result<LoadedKey, String>
     let mnemonic = Mnemonic::from_phrase(text)
         .map_err(|e| format!("not a 32-byte hex key and not a valid mnemonic ({e})"))?;
     let keychain = HdKeychain::from_mnemonic(&mnemonic, "", network).map_err(|e| e.to_string())?;
-    let derived =
-        keychain.derive(DEFAULT_ACCOUNT, RECEIVE_CHAIN, KEY_FILE_INDEX).map_err(|e| e.to_string())?;
+    let derived = keychain
+        .derive(DEFAULT_ACCOUNT, RECEIVE_CHAIN, KEY_FILE_INDEX)
+        .map_err(|e| e.to_string())?;
     let secret =
         SecretKey::from_bytes(&derived.secret_key().to_bytes()).map_err(|e| e.to_string())?;
     let public = *derived.public_key();

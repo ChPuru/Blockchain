@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assert_cmd::Command as CliCommand;
-use ferrum_node::config::{CliOverrides, MapEnv, resolve};
 use ferrum_node::Node;
+use ferrum_node::config::{CliOverrides, MapEnv, resolve};
 use ferrum_rpc::FerrumRpcClient as _;
 use ferrum_types::Network;
 use ferrum_wallet::Wallet;
@@ -78,10 +78,8 @@ async fn create_mine_send_and_read_the_balance_back_from_the_utxo_set() {
     let config = resolve(&overrides, &MapEnv::new(), None).expect("a resolvable configuration");
     let store_path = config.store_path();
     let node = Node::start(config).await.expect("the node starts");
-    let rpc_url = format!(
-        "http://{}",
-        node.rpc_addr().expect("the node bound its json-rpc listener")
-    );
+    let rpc_url =
+        format!("http://{}", node.rpc_addr().expect("the node bound its json-rpc listener"));
 
     let client = Arc::new(
         jsonrpsee::http_client::HttpClientBuilder::default()
@@ -141,13 +139,7 @@ async fn create_mine_send_and_read_the_balance_back_from_the_utxo_set() {
         let dir = wallet_dir_path.clone();
         let url = url.clone();
         let to = payout.clone();
-        move || {
-            last_line(&cli(
-                &dir,
-                &url,
-                &["wallet", "send", "--to", &to, "--amount", "1.0"],
-            ))
-        }
+        move || last_line(&cli(&dir, &url, &["wallet", "send", "--to", &to, "--amount", "1.0"]))
     })
     .await
     .expect("the wallet send subprocess ran");

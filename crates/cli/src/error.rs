@@ -122,7 +122,11 @@ pub enum CliError {
 
 impl CliError {
     /// An [`CliError::Invalid`] for a flag value.
-    pub fn invalid(what: &'static str, value: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub fn invalid(
+        what: &'static str,
+        value: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
         CliError::Invalid { what, value: value.into(), reason: reason.into() }
     }
 

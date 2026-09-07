@@ -24,10 +24,8 @@ use crate::rpc::rpc_err;
 pub async fn get(ctx: &Context, target: &str, verbosity: u8) -> CliResult<CommandOutput> {
     let client = ctx.client()?;
     let hash = resolve_target(ctx, target).await?;
-    let result = client
-        .get_block(hash.to_string(), Some(verbosity))
-        .await
-        .map_err(rpc_err("getblock"))?;
+    let result =
+        client.get_block(hash.to_string(), Some(verbosity)).await.map_err(rpc_err("getblock"))?;
 
     match result {
         GetBlockResult::Hex(body) => Ok(CommandOutput::scalar("hex", body)),

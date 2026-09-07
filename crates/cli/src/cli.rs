@@ -102,10 +102,7 @@ impl PassphraseArgs {
     /// Turn the flags into a [`PassphraseSource`].
     #[must_use]
     pub fn source(&self) -> PassphraseSource {
-        PassphraseSource {
-            file: self.passphrase_file.clone(),
-            prompt: self.prompt_passphrase,
-        }
+        PassphraseSource { file: self.passphrase_file.clone(), prompt: self.prompt_passphrase }
     }
 }
 

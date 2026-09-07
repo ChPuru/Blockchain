@@ -100,7 +100,8 @@ fn build(argv: &[&str]) -> Script {
 fn a_p2pkh_input_verifies() {
     let secret = key(7);
     let public: PublicKey = secret.public_key();
-    let script_pubkey = build(&["script", "build-p2pkh", "--pubkey", &hex::encode(public.as_bytes())]);
+    let script_pubkey =
+        build(&["script", "build-p2pkh", "--pubkey", &hex::encode(public.as_bytes())]);
 
     let tx = spending_tx(0, u32::MAX);
     let signature = sign(&secret, &tx, &script_pubkey);
@@ -146,10 +147,8 @@ fn a_2_of_3_multisig_input_verifies() {
     let tx = spending_tx(0, u32::MAX);
     // Signatures go in key order: CONTRACT §5.2 matches them in order and
     // there is no Bitcoin-style dummy element to absorb a mismatch.
-    let script_sig = push_all(&[
-        sign(&secrets[0], &tx, &script_pubkey),
-        sign(&secrets[2], &tx, &script_pubkey),
-    ]);
+    let script_sig =
+        push_all(&[sign(&secrets[0], &tx, &script_pubkey), sign(&secrets[2], &tx, &script_pubkey)]);
 
     let result = eval_verify(&script_sig, &script_pubkey, &tx);
     assert_eq!(result["success"], true, "{result}");
@@ -174,10 +173,8 @@ fn a_2_of_3_multisig_with_signatures_out_of_order_fails() {
     ]);
 
     let tx = spending_tx(0, u32::MAX);
-    let script_sig = push_all(&[
-        sign(&secrets[2], &tx, &script_pubkey),
-        sign(&secrets[0], &tx, &script_pubkey),
-    ]);
+    let script_sig =
+        push_all(&[sign(&secrets[2], &tx, &script_pubkey), sign(&secrets[0], &tx, &script_pubkey)]);
 
     let result = eval_verify(&script_sig, &script_pubkey, &tx);
     assert_eq!(result["success"], false, "{result}");
@@ -279,10 +276,8 @@ fn an_htlc_built_by_the_cli_classifies_and_disassembles() {
         "--refund",
         &"cc".repeat(20),
     ]);
-    let assert = cli()
-        .args(["--json", "script", "disassemble", &script.to_hex()])
-        .assert()
-        .success();
+    let assert =
+        cli().args(["--json", "script", "disassemble", &script.to_hex()]).assert().success();
     let json: Value = serde_json::from_slice(&assert.get_output().stdout).expect("json");
     assert_eq!(json["script_type"], "Htlc");
     let asm = json["disassembly"].as_str().unwrap_or_default();

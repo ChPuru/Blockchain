@@ -176,9 +176,7 @@ where
         None => Ok(None),
         Some(text) => match f(text.trim()) {
             Some(v) => Ok(Some(v)),
-            None => {
-                Err(ConfigError::Invalid { layer, key: key.to_owned(), value: text, expected })
-            }
+            None => Err(ConfigError::Invalid { layer, key: key.to_owned(), value: text, expected }),
         },
     }
 }
@@ -325,8 +323,14 @@ pub fn resolve(
     let metrics_listen = pick(
         field::METRICS_LISTEN,
         &mut sources,
-        parse_opt(ValueSource::Cli, "--metrics-listen", SOCKET, cli.metrics_listen.clone(), socket)?
-            .map(Some),
+        parse_opt(
+            ValueSource::Cli,
+            "--metrics-listen",
+            SOCKET,
+            cli.metrics_listen.clone(),
+            socket,
+        )?
+        .map(Some),
         parse_opt(
             ValueSource::Env,
             ENV_METRICS_LISTEN,
@@ -348,8 +352,20 @@ pub fn resolve(
     let log_format = pick(
         field::LOG_FORMAT,
         &mut sources,
-        parse_opt(ValueSource::Cli, "--log-format", FORMAT, cli.log_format.clone(), LogFormat::parse)?,
-        parse_opt(ValueSource::Env, ENV_LOG_FORMAT, FORMAT, env.get(ENV_LOG_FORMAT), LogFormat::parse)?,
+        parse_opt(
+            ValueSource::Cli,
+            "--log-format",
+            FORMAT,
+            cli.log_format.clone(),
+            LogFormat::parse,
+        )?,
+        parse_opt(
+            ValueSource::Env,
+            ENV_LOG_FORMAT,
+            FORMAT,
+            env.get(ENV_LOG_FORMAT),
+            LogFormat::parse,
+        )?,
         parse_opt(
             ValueSource::File,
             "telemetry.log_format",
@@ -417,10 +433,22 @@ pub fn resolve(
     let consensus = pick(
         field::CONSENSUS,
         &mut sources,
-        parse_opt(ValueSource::Cli, "--consensus", ENGINE, cli.consensus.clone(), EngineChoice::parse)?
-            .map(Some),
-        parse_opt(ValueSource::Env, ENV_CONSENSUS, ENGINE, env.get(ENV_CONSENSUS), EngineChoice::parse)?
-            .map(Some),
+        parse_opt(
+            ValueSource::Cli,
+            "--consensus",
+            ENGINE,
+            cli.consensus.clone(),
+            EngineChoice::parse,
+        )?
+        .map(Some),
+        parse_opt(
+            ValueSource::Env,
+            ENV_CONSENSUS,
+            ENGINE,
+            env.get(ENV_CONSENSUS),
+            EngineChoice::parse,
+        )?
+        .map(Some),
         parse_opt(
             ValueSource::File,
             "consensus.engine",

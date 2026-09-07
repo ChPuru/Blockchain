@@ -20,9 +20,7 @@ use ferrum_rpc::FerrumRpcClient as _;
 use ferrum_types::Network;
 use jsonrpsee::http_client::HttpClient;
 
-use crate::cli::{
-    BlockCmd, ChainCli, ChainCmd, Command, FaucetCmd, GenesisCmd, TxCmd, WalletCmd,
-};
+use crate::cli::{BlockCmd, ChainCli, ChainCmd, Command, FaucetCmd, GenesisCmd, TxCmd, WalletCmd};
 use crate::error::CliResult;
 use crate::output::CommandOutput;
 use crate::{paths, rpc};

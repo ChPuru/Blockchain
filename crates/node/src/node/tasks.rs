@@ -219,14 +219,13 @@ async fn handle_event(ctx: &P2pLoop, serves: &Arc<Semaphore>, event: P2pEvent) {
             };
             let chain = Arc::clone(&ctx.chain);
             tokio::spawn(async move {
-                let response =
-                    match blocking(move || serve::answer(&chain, &request)).await {
-                        Ok(response) => response,
-                        Err(e) => {
-                            tracing::warn!(%peer, error = %e, "could not build a sync response");
-                            ferrum_p2p::SyncResponse::NotFound
-                        }
-                    };
+                let response = match blocking(move || serve::answer(&chain, &request)).await {
+                    Ok(response) => response,
+                    Err(e) => {
+                        tracing::warn!(%peer, error = %e, "could not build a sync response");
+                        ferrum_p2p::SyncResponse::NotFound
+                    }
+                };
                 if let Err(e) = responder.respond(response) {
                     tracing::debug!(%peer, error = %e, "could not send a sync response");
                 }

@@ -126,16 +126,16 @@ fn borsh_block(block: &Block) -> Vec<u8> {
 /// Parse `--bits` as hex (`0x1d00ffff` or `1d00ffff`) or decimal.
 fn parse_bits(text: &str) -> CliResult<CompactTarget> {
     let trimmed = text.trim();
-    let value = if let Some(body) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X"))
-    {
-        u32::from_str_radix(body, 16)
-            .map_err(|e| CliError::invalid("--bits", text, e.to_string()))?
-    } else if trimmed.len() == 8 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
-        u32::from_str_radix(trimmed, 16)
-            .map_err(|e| CliError::invalid("--bits", text, e.to_string()))?
-    } else {
-        trimmed.parse::<u32>().map_err(|e| CliError::invalid("--bits", text, e.to_string()))?
-    };
+    let value =
+        if let Some(body) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+            u32::from_str_radix(body, 16)
+                .map_err(|e| CliError::invalid("--bits", text, e.to_string()))?
+        } else if trimmed.len() == 8 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+            u32::from_str_radix(trimmed, 16)
+                .map_err(|e| CliError::invalid("--bits", text, e.to_string()))?
+        } else {
+            trimmed.parse::<u32>().map_err(|e| CliError::invalid("--bits", text, e.to_string()))?
+        };
     let bits = CompactTarget(value);
     // Reject the negative and zero-mantissa forms here rather than after a
     // fruitless grind.

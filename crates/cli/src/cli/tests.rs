@@ -33,8 +33,7 @@ fn the_globals_are_accepted_before_the_subcommand() {
 
 #[test]
 fn the_globals_are_also_accepted_after_the_subcommand() {
-    let cli =
-        ChainCli::try_parse_from(["chain-cli", "chain", "info", "--json"]).unwrap();
+    let cli = ChainCli::try_parse_from(["chain-cli", "chain", "info", "--json"]).unwrap();
     assert!(cli.json);
 }
 
@@ -42,13 +41,8 @@ fn the_globals_are_also_accepted_after_the_subcommand() {
 fn there_is_no_passphrase_flag_anywhere() {
     // A passphrase in the argument vector is readable by every other
     // process on the machine. If this ever parses, that protection is gone.
-    let attempt = ChainCli::try_parse_from([
-        "chain-cli",
-        "wallet",
-        "new",
-        "--passphrase",
-        "hunter2",
-    ]);
+    let attempt =
+        ChainCli::try_parse_from(["chain-cli", "wallet", "new", "--passphrase", "hunter2"]);
     assert!(attempt.is_err());
 }
 
@@ -69,8 +63,7 @@ fn wallet_new_takes_an_output_file() {
 fn dump_pubkey_requires_a_key_file() {
     assert!(ChainCli::try_parse_from(["chain-cli", "wallet", "dump-pubkey"]).is_err());
     assert!(
-        ChainCli::try_parse_from(["chain-cli", "wallet", "dump-pubkey", "--key", "v.key"])
-            .is_ok()
+        ChainCli::try_parse_from(["chain-cli", "wallet", "dump-pubkey", "--key", "v.key"]).is_ok()
     );
 }
 
@@ -163,4 +156,3 @@ fn wallet_send_matches_the_devnet_invocation() {
         other => panic!("parsed as {other:?}"),
     }
 }
-
