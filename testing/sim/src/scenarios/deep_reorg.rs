@@ -48,7 +48,7 @@ pub const MEMPOOL_REORG_MEMORY: usize = 4;
 /// every fixture would make this scenario slow without making it stronger.
 #[must_use]
 pub fn short_maturity_params() -> ChainParams {
-    let mut params = ChainParams::devnet();
+    let mut params = crate::sim_params();
     params.coinbase_maturity = 5;
     params
 }

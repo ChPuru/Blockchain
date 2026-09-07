@@ -34,11 +34,36 @@ use crate::view::{SimHeaderView, median_time_past_of};
 
 /// How many nonces the harness will try before giving up on a block.
 ///
-/// The devnet `pow_limit` accepts roughly half of all hashes, so a legitimate
-/// block is found in a handful of tries. A budget exists only so that a
-/// scenario which asks for an unreachable target fails with a clear error
-/// instead of hanging a CI job.
+/// [`sim_params`] mines at a target that accepts roughly half of all hashes, so
+/// a legitimate block is found in a handful of tries. A budget exists only so
+/// that a scenario which asks for an unreachable target fails with a clear
+/// error instead of hanging a CI job.
 pub const MINING_ATTEMPT_BUDGET: u64 = 1 << 22;
+
+/// Devnet parameters for a simulation fixture: everything
+/// `ChainParams::devnet` says, mined at a trivial target.
+///
+/// Devnet's shipped `pow_limit` is `0x1e00ffff` — about `2^24` header hashes
+/// per block, which is deliberate on a real network (a devnet that seals in a
+/// microsecond outruns its own gossip) and pure cost here. This crate exists to
+/// pin the *state transition*: it replays 140 blocks against a golden
+/// state-root file and diffs `ferrum-chain` against an independent
+/// reference executor. Neither of those depends on how hard the header was to
+/// find, and paying `2^24` hashes a block would put the determinism gate at
+/// twenty minutes and blow straight past [`MINING_ATTEMPT_BUDGET`].
+///
+/// Everything the simulator *does* care about — the subsidy schedule, coinbase
+/// maturity, block size, timestamp rules, the ASERT constants — is the shipped
+/// devnet value.
+#[must_use]
+pub fn sim_params() -> ChainParams {
+    let mut params = ChainParams::devnet();
+    let mut limit = [0xffu8; 32];
+    limit[0] = 0x7f;
+    params.pow_limit = limit;
+    params.genesis_bits = CompactTarget(0x207f_ffff);
+    params
+}
 
 mod plan;
 
@@ -90,11 +115,14 @@ impl ChainBuilder {
 
     /// A devnet chain, the network every scenario uses.
     ///
+    /// Built on [`sim_params`], not `ChainParams::devnet()` directly: see there
+    /// for why the fixtures mine at a trivial target.
+    ///
     /// # Errors
     ///
     /// As [`ChainBuilder::new`].
     pub fn devnet(seed: u64) -> Result<Self, SimError> {
-        Self::new(ChainParams::devnet(), seed)
+        Self::new(sim_params(), seed)
     }
 
     // ---- accessors ----------------------------------------------------
@@ -593,14 +621,18 @@ mod tests {
     #[test]
     fn coinbase_outputs_become_spendable_only_after_maturity() {
         let mut b = devnet();
+        let maturity = b.params().coinbase_maturity;
         b.advance(3).unwrap();
         assert!(b.mature(3).is_empty(), "nothing matures within three blocks");
         assert_eq!(b.spendable().len(), 3);
-        // The coinbase of block 1 matures at height 101, block 2's at 102,
-        // block 3's at 103.
-        assert_eq!(b.mature(101).len(), 1);
-        assert_eq!(b.mature(102).len(), 2);
-        assert_eq!(b.mature(103).len(), 3);
+        // The coinbase of block `h` matures at height `h + maturity`. Read off
+        // the parameters rather than written out: devnet's maturity is 10 and
+        // mainnet's is 100, and what this test is about is the boundary, not
+        // the number.
+        assert_eq!(b.mature(maturity), Vec::new(), "block 1 is still one block short");
+        assert_eq!(b.mature(maturity + 1).len(), 1, "block 1's coinbase, and only that one");
+        assert_eq!(b.mature(maturity + 2).len(), 2);
+        assert_eq!(b.mature(maturity + 3).len(), 3);
     }
 
     #[test]

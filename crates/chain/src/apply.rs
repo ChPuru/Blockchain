@@ -21,8 +21,10 @@
 //!
 //! Two rules need the header chain, which the seam deliberately cannot see:
 //!
-//! - **`bits == engine.next_bits(parent)`** (SPEC §3.2 rule 7) needs the ASERT
-//!   anchor, which lives at height 1 of the active chain.
+//! - **`bits == engine.next_bits(parent)`** (SPEC §3.2 rule 7) needs the
+//!   parent's height, which only the header chain knows. The ASERT anchor is
+//!   genesis and comes from `ChainParams`, never from the chain, so difficulty
+//!   is a pure function of the parent and the parameters (CONTRACT §6.3).
 //! - **BFT seal verification** (rule 11) needs the validator set active at this
 //!   height and a `2f+1` count over the header chain.
 //!

@@ -8,8 +8,29 @@
 //! - [`TestChain`] runs a real [`Store`] with a real [`ChainManager`], for the
 //!   tests that are about acceptance, reorganisation and fork choice.
 //!
-//! Devnet's proof-of-work limit accepts roughly half of all hashes, so
-//! "mining" here is a handful of nonces, not a wait.
+//! # Mining cost, and why these fixtures do not pay it
+//!
+//! Devnet's shipped `pow_limit` is `0x1e00ffff` — about `2^24` header hashes
+//! per block, roughly 1.9 s on one core in release and 7.8 s in the unoptimised
+//! test profile. That is deliberate: a devnet that seals a block in a
+//! microsecond outruns its own gossip and cannot converge (see
+//! `ChainParams::devnet`). It is also a cost these fixtures have no reason to
+//! pay. Measured on the machine devnet was tuned on: `cargo test -p ferrum-chain
+//! --lib` takes **633 s** when these fixtures mine at the shipped limit and
+//! **1.1 s** when they do not, and every one of those 632 seconds re-proves the
+//! same thing — that BLAKE3 still works.
+//!
+//! So [`devnet`] and [`devnet_with`] apply [`trivial_pow`]: the same devnet
+//! parameter set, mined at the pre-2026 devnet target, which accepts about half
+//! of all header hashes. Nothing these fixtures exist to check depends on the
+//! absolute target. Acceptance, undo and fork choice compare
+//! `work(target) = 2^256 / (target + 1)`, which is scale-free, so a branch 60x
+//! harder than its base still out-works a longer one.
+//!
+//! A test that *is* about the shipped numbers — the published genesis hash, the
+//! `pow_limit` clamp, `bits` validation — must therefore take
+//! `ChainParams::devnet()` directly and not go through these helpers.
+//! `genesis_tests` does exactly that.
 
 use std::sync::Arc;
 
@@ -28,15 +49,39 @@ use crate::manager::{AcceptOutcome, ChainManager};
 use crate::validate::{build_coinbase_script_sig, compute_merkle_root};
 use crate::view::StoreHeaderView;
 
-/// Plain devnet parameters.
+/// Devnet parameters for a fixture: the shipped set, mined at a trivial
+/// target. See the module docs, and [`trivial_pow`] for what is relaxed.
 pub fn devnet() -> ChainParams {
-    ChainParams::devnet()
+    devnet_with(|_| {})
+}
+
+/// Mine at a trivial target: the pre-2026 devnet limit, `0x207fffff`, which
+/// accepts about half of all header hashes.
+///
+/// [`devnet_with`] applies this for you; it is public so that a fixture built
+/// from `ChainParams` some other way can opt in explicitly, and so that the
+/// reason has a name. Fork choice compares
+/// `work(target) = 2^256 / (target + 1)`, so a branch whose blocks are 60x
+/// harder than their base outweighs a longer branch by the same ratio whatever
+/// the base is — the absolute target only decides how long the test takes.
+///
+/// Do **not** reach for this in a test that is about the `pow_limit` itself,
+/// about `bits` validation, or about the published devnet genesis hash.
+pub fn trivial_pow(p: &mut ChainParams) {
+    let mut limit = [0xffu8; 32];
+    limit[0] = 0x7f;
+    p.pow_limit = limit;
+    p.genesis_bits = CompactTarget(0x207f_ffff);
 }
 
 /// Devnet parameters with a tweak applied, for tests that need a shorter
 /// maturity or a faster difficulty controller.
+///
+/// [`trivial_pow`] is applied first, so a caller that wants the shipped target
+/// back can ask for it explicitly.
 pub fn devnet_with(f: impl FnOnce(&mut ChainParams)) -> ChainParams {
     let mut p = ChainParams::devnet();
+    trivial_pow(&mut p);
     f(&mut p);
     p
 }

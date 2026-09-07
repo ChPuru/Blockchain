@@ -95,13 +95,15 @@ independently; if yours differ you are on a different chain, which is the check 
 |---|---|
 | mainnet | `6bfa4fee9e522a6071b5d7d04fc400144d9f519ba95b78d37346f7c597c4436c` |
 | testnet | `9edeafc16709d76a957c0b11587881cb0161dd19069fc25025fbdc4b4ff6e516` |
-| devnet  | `483bb2d9c173599d19dfbb8705c43ebf8ca0d44860889d50867b0c137d59aaf6` |
+| devnet  | `9167643790fc744081aa3656d33a4e02fc122b729198716563b2ee60db428444` |
 
 All three share `timestamp_ms = 1735689600000` (2025-01-01T00:00:00Z), `version = 1` and
 `nonce = 0`; the 50 FRM subsidy is burned to an `OP_RETURN` committing to the network's parameters,
 which is what stops mainnet and testnet — identical in every rule but `chain_id` and address prefix
-— from sharing a genesis hash. The full field-by-field table is in
-[`docs/RUNNING.md`](docs/RUNNING.md) §4.
+— from sharing a genesis hash. Devnet's hash differs from the other two by more than identity: it
+runs a 5 s spacing, a 300 s ASERT half-life, a 10-block coinbase maturity and a `pow_limit` one
+base-256 digit easier than mainnet's, and `genesis_commitment` covers every one of those. The full
+field-by-field table is in [`docs/RUNNING.md`](docs/RUNNING.md) §4.
 
 ---
 

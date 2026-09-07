@@ -494,7 +494,8 @@ async function viewAddress(addr) {
       stats,
       a.immature && a.immature !== "0"
         ? el("p", { class: "muted", style: "margin:-10px 0 20px;font-size:13px" },
-            "Immature coins are coinbase outputs younger than 100 blocks. That maturity window is a " +
+            "Immature coins are coinbase outputs younger than this network's coinbase maturity " +
+            "(100 blocks on mainnet and testnet, 10 on devnet). That maturity window is a " +
             "consensus rule, not a wallet policy: spending a coinbase immediately would lose the coins " +
             "on any reorg deeper than the spend.")
         : null,

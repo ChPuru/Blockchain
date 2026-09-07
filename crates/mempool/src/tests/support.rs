@@ -28,11 +28,22 @@ use ferrum_types::{
 use crate::{MempoolConfig, MempoolEntry};
 
 /// Devnet parameters with a one-block coinbase maturity, so a fixture does not
-/// have to mine a hundred blocks to spend anything.
+/// have to mine ten blocks to spend anything, and a trivial proof-of-work
+/// target, so mining them costs nothing.
+///
+/// Devnet's shipped `pow_limit` is `0x1e00ffff` — about `2^24` header hashes a
+/// block, which is deliberate on a real network and pure overhead here: this
+/// file is about mempool acceptance and reorg reconciliation, and neither
+/// depends on how hard a header was to find. Measured: these fixtures take
+/// 152 s at the shipped limit and under a second without it.
 #[must_use]
 pub fn params() -> ChainParams {
     let mut p = ChainParams::devnet();
     p.coinbase_maturity = 1;
+    let mut limit = [0xffu8; 32];
+    limit[0] = 0x7f;
+    p.pow_limit = limit;
+    p.genesis_bits = CompactTarget(0x207f_ffff);
     p
 }
 

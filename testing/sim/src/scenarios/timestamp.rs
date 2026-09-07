@@ -39,14 +39,15 @@ use crate::scenarios::{Verdict, judge};
 
 /// Devnet with a starting target well below `pow_limit`.
 ///
-/// Devnet's genesis target *is* its `pow_limit`, so ASERT has nowhere to go
-/// when a chain runs slow: every easier target clamps back to the limit and
-/// the controller looks inert. These parameters leave 128× of headroom above
-/// and unlimited room below, while still costing about 256 hashes per block,
+/// On any shipped network the genesis target *is* the `pow_limit`, so ASERT has
+/// nowhere to go when a chain runs slow: every easier target clamps back to the
+/// limit and the controller looks inert. These parameters keep the trivial
+/// `sim_params` limit but start the chain 128x below it, leaving headroom above
+/// and unlimited room below, while still costing about 256 hashes per block —
 /// so difficulty is observable without making the fixtures slow.
 #[must_use]
 pub fn retarget_params() -> ChainParams {
-    let mut params = ChainParams::devnet();
+    let mut params = crate::sim_params();
     params.genesis_bits = CompactTarget(0x2000_ffff);
     params
 }
@@ -149,7 +150,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use ferrum_chain::ValidationError;
-    use ferrum_consensus::{ConsensusError, U256};
+    use ferrum_consensus::{AsertAnchor, ConsensusError, U256, asert_next_bits};
 
     use super::*;
     use crate::prng::XorShift64;
@@ -322,11 +323,25 @@ mod tests {
     }
 
     #[test]
-    fn the_anchor_governs_the_first_block_rather_than_asert() {
-        // Below the anchor at height 1 there is nothing to measure against, so
-        // the target is the genesis target exactly (CONTRACT §6.3).
+    fn the_first_block_is_on_the_asert_schedule_like_every_other() {
+        // The anchor is genesis itself (CONTRACT §6.3), so height 1 is not
+        // exempt from the controller the way it used to be: its target is what
+        // ASERT says for a parent at height 0, not `genesis_bits` copied
+        // forward. Asserting against the controller rather than against a
+        // literal keeps this honest whether or not the answer meets the
+        // `pow_limit` clamp on the way out.
         let c = ChainBuilder::new(retarget_params(), 14).unwrap();
-        assert_eq!(c.next_bits().unwrap(), c.params().genesis_bits);
+        let params = c.params().clone();
+        let engine = PowEngine::new(params.clone());
+        let anchor = AsertAnchor::genesis(&params).unwrap();
+        let expected = asert_next_bits(
+            &anchor,
+            i64::try_from(params.genesis_timestamp_ms / 1_000).unwrap(),
+            0,
+            &engine.asert_params(),
+        )
+        .unwrap();
+        assert_eq!(c.next_bits().unwrap(), expected);
     }
 
     #[test]

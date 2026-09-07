@@ -11,7 +11,6 @@ use crate::genesis::{
     GENESIS_MESSAGE_PREFIX, GENESIS_VERSION, genesis_block, genesis_coinbase, genesis_commitment,
     genesis_hash, genesis_header, genesis_message, genesis_script_pubkey,
 };
-use crate::tests::support::devnet_with;
 use crate::validate::{
     COINBASE_SCRIPT_SIG_MAX, COINBASE_SCRIPT_SIG_MIN, check_block_sanity,
     check_coinbase_script_sig, compute_merkle_root,
@@ -126,7 +125,12 @@ fn the_commitment_moves_when_any_consensus_parameter_moves() {
         |p| p.genesis_nonce = 1,
     ];
     for mutate in mutations {
-        let changed = devnet_with(mutate);
+        // Mutate a clone of the shipped set rather than going through
+        // `tests::support::devnet_with`, which also relaxes `pow_limit` and
+        // `genesis_bits`: this test must fail when a mutation does nothing, and
+        // it cannot do that if the helper has already moved the commitment.
+        let mut changed = base.clone();
+        mutate(&mut changed);
         assert_ne!(genesis_commitment(&changed), baseline);
         assert_ne!(genesis_hash(&changed), genesis_hash(&base));
     }
@@ -169,5 +173,54 @@ fn a_network_name_round_trips_through_its_parameters() {
     for network in Network::ALL {
         let params = network.params();
         assert!(genesis_message(&params).ends_with(network.name()));
+    }
+}
+
+/// The genesis hashes and merkle roots published in `README.md` and
+/// `docs/RUNNING.md` §4.
+///
+/// Those documents tell an operator to compare their node's computed genesis
+/// against these values before believing they are on the network they think
+/// they are on. A parameter change that moves a hash and leaves the documents
+/// behind turns that instruction into a lie, and nothing else in the tree
+/// catches it — so this test is the tripwire. If it fails, either the change
+/// was not intended or the two documents need the new value.
+///
+/// **Mainnet and testnet are frozen.** Their networks are published; a change
+/// to either line here is a change to a live chain, not a test fixture. Devnet
+/// moves whenever its parameters move, which is the point of
+/// `genesis_commitment`.
+#[test]
+fn the_published_genesis_hashes_are_these() {
+    let expected = [
+        (
+            ChainParams::mainnet(),
+            "6bfa4fee9e522a6071b5d7d04fc400144d9f519ba95b78d37346f7c597c4436c",
+            "9967df4f7957e4bb8b629dc5cbe60411c3ec4058f88a3136e832805ddd409405",
+        ),
+        (
+            ChainParams::testnet(),
+            "9edeafc16709d76a957c0b11587881cb0161dd19069fc25025fbdc4b4ff6e516",
+            "c63d0a3f08a4dd8d451c70ab01ab5f9fccb8e9b44fdb538a6a1cf56e1f6e8650",
+        ),
+        (
+            ChainParams::devnet(),
+            "9167643790fc744081aa3656d33a4e02fc122b729198716563b2ee60db428444",
+            "8fedad9c3ec385af18086c5cb8596f6aa7c017886c40289688a311eacd40030a",
+        ),
+    ];
+    for (params, hash, merkle) in expected {
+        assert_eq!(
+            genesis_hash(&params).to_hex(),
+            hash,
+            "{} genesis hash moved; update README.md and docs/RUNNING.md §4",
+            params.network
+        );
+        assert_eq!(
+            genesis_header(&params).merkle_root.to_hex(),
+            merkle,
+            "{} genesis merkle root moved; update docs/RUNNING.md §4",
+            params.network
+        );
     }
 }

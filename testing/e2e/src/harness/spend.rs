@@ -13,8 +13,8 @@
 //! # Maturity is applied here, not discovered later
 //!
 //! Every coin a mining node holds on a young chain is a coinbase, and a
-//! coinbase is unspendable for `coinbase_maturity` blocks — 100, on devnet as
-//! on mainnet. Filtering immature coins out *before* selection turns "the
+//! coinbase is unspendable for `coinbase_maturity` blocks — 100 on mainnet and
+//! testnet, 10 on devnet. Filtering immature coins out *before* selection turns "the
 //! transaction was built and then the mempool refused it" into an honest
 //! "there is nothing spendable yet", which is a far better failure message at
 //! two in the morning.
@@ -70,10 +70,22 @@ impl TestNet {
 
     /// Mine on node `index` until its first coinbase is spendable.
     ///
-    /// `coinbase_maturity + 1` blocks, which is 101 on every Ferrum network
-    /// including devnet: maturity is a *consensus* rule and a devnet that
-    /// relaxed it would stop being evidence about mainnet. Sealing is trivial
-    /// here, so the cost is a hundred `redb` commits, not a hundred nonces.
+    /// `coinbase_maturity + 1` blocks: 101 on mainnet and testnet, 11 on
+    /// devnet, read off `ChainParams` rather than written out.
+    ///
+    /// Devnet's window is shorter than mainnet's, and that does not weaken what
+    /// this harness proves. Maturity is a consensus rule and it is the same code
+    /// on every network — `height >= coin.height + maturity`, checked in
+    /// `apply_block` and again in the mempool; only the constant it reads
+    /// changes. The tests below still exercise both sides of the comparison: a
+    /// young chain has nothing spendable, and a chain `maturity + 1` deep has
+    /// exactly the two coinbases that have aged past it, so an off-by-one in
+    /// either direction fails here. The exact boundary is pinned in
+    /// `ferrum-chain`'s `a_coinbase_spent_before_maturity_is_rejected`.
+    ///
+    /// The window is 10 rather than 100 because devnet's blocks now cost about
+    /// 2^24 hashes each: a hundred-block warm-up would turn every end-to-end
+    /// run into a hashing benchmark.
     ///
     /// Returns the height reached.
     ///
@@ -306,8 +318,10 @@ mod tests {
         let maturity = net.params().coinbase_maturity;
         net.mine_blocks(0, usize::try_from(maturity).unwrap() + 1).await.unwrap();
 
-        // At tip height 101 a payment lands at 102, and the maturity rule is
-        // `height >= coin.height + 100`, so heights 1 and 2 have matured.
+        // At tip height `maturity + 1` a payment lands at `maturity + 2`, and the
+        // rule is `height >= coin.height + maturity`, so exactly the coinbases
+        // of heights 1 and 2 have matured — on any network, whatever the
+        // constant is.
         let coins = net.spendable_coins(0).unwrap();
         assert_eq!(coins.len(), 2, "the coinbases of heights 1 and 2 have matured");
         assert!(net.spendable_balance(0).unwrap() > Amount::ZERO);

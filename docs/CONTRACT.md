@@ -217,12 +217,12 @@ pub struct ChainParams {
     pub network: Network,                 // Mainnet | Testnet | Devnet
     pub chain_id: ChainId,
     pub bech32_hrp: &'static str,         // "fer" | "tfer" | "rfer"
-    pub target_spacing_ms: u64,           // 120_000
-    pub asert_halflife_s: i64,            // 7200
+    pub target_spacing_ms: u64,           // 120_000 mainnet/testnet, 5_000 devnet
+    pub asert_halflife_s: i64,            // 7200 mainnet/testnet, 300 devnet
     pub pow_limit: [u8; 32],              // big-endian max target
     pub initial_subsidy: Amount,          // 50 FRM
     pub halving_interval: u64,            // 210_000 blocks
-    pub coinbase_maturity: u64,           // 100 blocks
+    pub coinbase_maturity: u64,           // 100 blocks; 10 on devnet
     pub max_block_size: usize,            // 1_000_000 bytes
     pub max_future_block_time_ms: u64,    // 7_200_000 (2 h)
     pub median_time_span: usize,          // 11

@@ -21,19 +21,39 @@ for API surface, [`DECISIONS.md`](DECISIONS.md) for why things are the way they 
 |---|---|---|---|
 | `chain_id` | 1 | 2 | 3 |
 | bech32m HRP | `fer` | `tfer` | `rfer` |
-| Target block spacing | 120 000 ms | 120 000 ms | 120 000 ms |
-| ASERT half-life | 7 200 s | 7 200 s | 7 200 s |
+| Target block spacing | 120 000 ms | 120 000 ms | 5 000 ms |
+| ASERT half-life | 7 200 s | 7 200 s | 300 s |
 | Initial subsidy | 50 FRM | 50 FRM | 50 FRM |
 | Halving interval | 210 000 blocks | 210 000 blocks | 210 000 blocks |
-| Coinbase maturity | 100 blocks | 100 blocks | 100 blocks |
+| Coinbase maturity | 100 blocks | 100 blocks | 10 blocks |
 | Max block size | 1 000 000 B | 1 000 000 B | 1 000 000 B |
 | Max future block time | 7 200 000 ms | 7 200 000 ms | 7 200 000 ms |
 | Median time span | 11 headers | 11 headers | 11 headers |
-| `pow_limit` | hard | hard | trivially easy |
+| `pow_limit` | `0x1d00ffff` | `0x1d00ffff` | `0x1e00ffff` — 256× easier |
 
-The half-life is `N × T × ln 2` with `N ≈ 86` at `T = 120 s`, giving 7 200 s. `N` in `[50, 100]` is
-the range in which ASERT responds to a real hashrate change within a few hours without amplifying
-timestamp noise.
+The half-life is `N × T × ln 2` with the same `N ≈ 86` on every network: 7 200 s at `T = 120 s` on
+mainnet and testnet, 300 s at `T = 5 s` on devnet. Equivalently, the half-life is exactly 60 block
+spacings everywhere. `N` in `[50, 100]` is the range in which ASERT answers a real hashrate change
+within a few block-schedule-lengths without amplifying timestamp noise: below 50 it chases noise,
+above 100 it is too slow to be a controller.
+
+**Devnet's four differences are not cosmetic, and none of them is "trivially easy".** Devnet exists
+so that four nodes on one laptop converge in a way a person can watch:
+
+- `pow_limit` is `0x1e00ffff`, mainnet's limit shifted one base-256 digit — about `2²⁴` header
+  hashes per block, measured at ~1.9 s on one core of the machine it was tuned on. The old devnet
+  limit (`0x207fffff`, roughly two hashes per block) produced blocks faster than a peer could
+  validate, store and gossip them, so a relay node sat permanently behind, and it let both miners
+  seal their own height 1 before libp2p had dialled anyone.
+- `target_spacing_ms` is 5 s and the half-life follows it, so the controller settles in minutes.
+- `coinbase_maturity` is 10 blocks — 50 s at that spacing — so an end-to-end "mine, mature, spend"
+  run finishes. The rule is still enforced as a rule; only the window is shorter.
+
+Because ASERT is an *absolute* schedule anchored on genesis (§6.2) and devnet's genesis timestamp is
+2025-01-01, a devnet brought up today reads as tens of millions of seconds behind schedule at
+height 1: the exponent saturates and every required target is the `pow_limit` clamp. On devnet,
+therefore, `pow_limit` **is** the difficulty, which is why it is the number that had to be
+measured.
 
 Maximum money is `21 000 000 FRM`, and the subsidy schedule is the only source of new coins:
 

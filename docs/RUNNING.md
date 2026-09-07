@@ -37,8 +37,9 @@ recipe is a one-line `cargo` or `bash` command, so nothing below depends on havi
 ./target/release/chaind --network devnet --mine --index --datadir ./data
 ```
 
-Devnet uses a trivially easy `pow_limit`, so the first blocks appear within milliseconds. `--index`
-is not required to run a node, but the explorer's transaction and address pages need it — see §3.
+Devnet's `pow_limit` is 256× easier than mainnet's, which on the machine this was tuned on is
+about **1.9 s of hashing per block on one core** — real work, but watchable. `--index` is not
+required to run a node, but the explorer's transaction and address pages need it — see §3.
 In another shell:
 
 ```sh
@@ -65,7 +66,8 @@ deliberately no `--passphrase` flag, because an argument vector is readable by o
 lands in shell history.
 
 To mine to your own address rather than a throwaway one, restart with
-`--mine-address rfer1...`. Coinbase outputs mature after **100 blocks**; until then they show as
+`--mine-address rfer1...`. Coinbase outputs mature after `coinbase_maturity` blocks — **100 on
+mainnet and testnet, 10 on devnet** (50 s at devnet's 5 s spacing); until then they show as
 `immature` and cannot be spent. That is a consensus rule, not a wallet policy — a chain that let you
 spend a coinbase immediately would lose those coins on any reorg deeper than the spend.
 
@@ -120,33 +122,36 @@ genesis and a static peer list.
 bash devnet/status.sh          # every node's tip hash, height and cumulative work
 ```
 
-> **Read this before you believe `status.sh`.** On a fast desktop the four-node devnet frequently
-> does **not** converge, and `heal.sh` will tell you so in red. Two measured causes, neither of them
-> a flake:
+> **This used to fail, and it is worth knowing why.** On a fast desktop the four-node devnet used
+> to converge only rarely, and `heal.sh` said so in red. Two measured causes, neither of them a
+> flake, both now fixed:
 >
-> 1. **Both miners seal their own block 1 before the mesh exists.** Devnet's `pow_limit` is
->    `0x7fff…`, so a node mines height 1 within a millisecond of opening its store — before libp2p
->    has dialled anyone. Height 1 is the ASERT anchor, and `PowEngine::anchor` reads it through
->    `HeaderView::header_at_height`, which is defined as *the active chain* (CONTRACT §6.4). Two
->    nodes with different height-1 blocks therefore compute different required `bits` for each
->    other's headers, reject them as `BadDifficultyTransition`, and ban each other. That fork is
->    permanent. You can see it directly:
->    `for i in 1 2 3 4; do chain-cli --rpc http://127.0.0.1:$((8644+i)) block hash 1 | tail -1; done`
->    — if those four hashes are not all equal, the network will never agree.
-> 2. **Blocks outrun gossip for the first few hours.** ASERT's half-life is 7200 s, so pulling
->    spacing from "instant" back to the 120 s target takes hours of wall-clock, not blocks. Until
->    then a miner produces blocks faster than a relay can validate and store them, and a relay node
->    sits a constant few dozen blocks behind.
+> 1. **The ASERT anchor was fork-dependent.** It was specified and implemented as "the block at
+>    height 1, read through `HeaderView::header_at_height`" — and that method is defined as the
+>    *active* chain (CONTRACT §6.4). Two nodes holding different height-1 blocks computed different
+>    required `bits` for each other's headers, rejected them as `BadDifficultyTransition`, and
+>    banned each other. The fork was permanent and unrecoverable, because a header that fails
+>    validation never reaches fork choice at all. The anchor is now **genesis**, built from
+>    `ChainParams` alone (SPEC §6.2), so it is byte-identical on every node by construction.
+> 2. **Blocks outran gossip.** Devnet's `pow_limit` was `0x7fff…`, which accepts about half of all
+>    header hashes: a node sealed a block in roughly a *microsecond*, far faster than a peer could
+>    validate, store and gossip one, so a relay node sat permanently behind — and both miners sealed
+>    their own height 1 within a millisecond of opening their stores, before libp2p had dialled
+>    anyone, which is what made cause 1 fire on almost every run. Devnet's limit is now
+>    `0x1e00ffff`, one base-256 digit easier than mainnet's: about `2²⁴` header hashes, measured at
+>    ~1.9 s per block on one core of the machine this was tuned on. Two mining nodes therefore seal
+>    roughly one block per second, and every node has met its peers long before the first one
+>    exists.
 >
-> The demonstration below is still worth watching — the reorg machinery is real and
-> `crates/p2p/tests/two_node.rs` plus `testing/sim` exercise it deterministically — but on a fast
-> machine expect to read the logs rather than the tip hashes. `devnet/ci-e2e.sh` is the
-> assertion-carrying version and it fails loudly rather than quietly when this happens.
+> `status.sh` should now print `CONVERGED` within a few seconds of `up.sh` finishing, and keep
+> printing it. If it does not, that is a real bug rather than a race — `devnet/ci-e2e.sh` is the
+> assertion-carrying version and fails loudly.
 
 Now split the network:
 
 ```sh
 bash devnet/partition.sh       # nodes 1+2 | nodes 3+4, both halves keep mining
+sleep 30                       # ~30 blocks per side at the 5 s spacing: a visible divergence
 bash devnet/status.sh          # two different tips, both valid, both growing
 bash devnet/heal.sh            # reconnect; it waits 180 s for one tip and reports pass or fail
 bash devnet/status.sh          # one tip again, on the branch with more cumulative work
@@ -280,7 +285,7 @@ node is on the network you think it is on:
 |---|---|
 | **mainnet** | `6bfa4fee9e522a6071b5d7d04fc400144d9f519ba95b78d37346f7c597c4436c` |
 | **testnet** | `9edeafc16709d76a957c0b11587881cb0161dd19069fc25025fbdc4b4ff6e516` |
-| **devnet**  | `483bb2d9c173599d19dfbb8705c43ebf8ca0d44860889d50867b0c137d59aaf6` |
+| **devnet**  | `9167643790fc744081aa3656d33a4e02fc122b729198716563b2ee60db428444` |
 
 The fields behind them, shared by all three except where the table says otherwise:
 
@@ -290,14 +295,20 @@ The fields behind them, shared by all three except where the table says otherwis
 | `prev_hash` | 32 zero bytes |
 | `timestamp_ms` | `1735689600000` — 2025-01-01T00:00:00Z |
 | `nonce` | `0` |
-| `bits` | `0x1d00ffff` on mainnet and testnet, `0x207fffff` on devnet |
+| `bits` | `0x1d00ffff` on mainnet and testnet, `0x1e00ffff` on devnet — the same mantissa one base-256 digit easier, i.e. 256× |
 | coinbase input | `OutPoint::NULL` — 32 zero bytes and `vout = 0xffffffff` — with `sequence = 0xffffffff` |
 | coinbase `script_sig` | `0x00` (`OP_0`, the minimal push of height 0, BIP-34) then a push of the ASCII `Ferrum v1 genesis <network>`; 26 bytes on devnet, inside the 2..=100 window rule 14 requires |
 | coinbase output | the 50 FRM subsidy, locked to `OP_RETURN <32-byte genesis_commitment>` — provably unspendable, so the subsidy is burned |
 | `merkle_root` | mainnet `9967df4f7957e4bb8b629dc5cbe60411c3ec4058f88a3136e832805ddd409405` |
 | | testnet `c63d0a3f08a4dd8d451c70ab01ab5f9fccb8e9b44fdb538a6a1cf56e1f6e8650` |
-| | devnet `62dc399a49d46715f4408da357724c00046dabb40fd9e4ed0cd51d3ad39c0431` |
+| | devnet `8fedad9c3ec385af18086c5cb8596f6aa7c017886c40289688a311eacd40030a` |
 | serialized block | 230 bytes on mainnet and testnet, 229 on devnet (`borsh(Block)`) |
+
+Devnet's hash is not merely a different `chain_id`: `genesis_commitment` covers `target_spacing_ms`,
+`asert_halflife_s`, `pow_limit`, `coinbase_maturity` and `genesis_bits`, and devnet sets all five
+differently (5 000 ms, 300 s, `0x000000ffff00…`, 10 blocks, `0x1e00ffff`). Change any one of
+them and this hash changes, which is the point: two nodes that disagree about the difficulty rule
+cannot complete a handshake, let alone a sync.
 
 Mainnet and testnet share every structural and monetary rule and differ only in `chain_id` and
 address prefix, so without something network-specific *inside* the block they would have the same
@@ -315,17 +326,20 @@ Three independent paths, all of which must agree:
 
 # 2. what it then serves over RPC
 ./target/release/chain-cli block hash 0 | tail -1
-
-# 3. what the grinder rebuilds from the parameters alone
-./target/release/chain-cli genesis mine --network devnet --max-tries 1
-#   -> nonce=0 hash=483bb2d9c173599d19dfbb8705c43ebf8ca0d44860889d50867b0c137d59aaf6
 ```
 
-A fourth, if you want to check the bytes rather than the tooling:
-`chain-cli --json genesis mine --network devnet --max-tries 1` prints `block_hex`, the whole
-`borsh(Block)`. Its first 88 bytes are the header, laid out exactly as
-[`ENCODING.md`](ENCODING.md) §3 describes, and `tagged_hash("ferrum.v1.header", those_88_bytes)` is
-the hash in the table above.
+Note what is **not** on that list any more. `chain-cli genesis mine --network devnet --max-tries 1`
+used to reprint the devnet hash, because the old devnet target was met by nonce 0. It no longer is:
+`0x1e00ffff` needs about 2²⁴ tries, so that command now fails with `no genesis nonce satisfied bits
+0x1e00ffff in 1 tries`, exactly as it always has on mainnet. Devnet genesis still carries
+`nonce = 0` and still does not satisfy its own `bits` — SPEC §2 exempts genesis from proof-of-work
+validation, because there is no parent to validate it against — so this is a property of the
+grinder, not a defect in the block. `genesis mine` is for launching a *new* network; see below.
+
+A third path, if you want to check the arithmetic rather than the tooling: the header is the 88
+bytes [`ENCODING.md`](ENCODING.md) §3 lays out, and the hash above is
+`tagged_hash("ferrum.v1.header", those_88_bytes)`. Every field of it is in the table below, so it
+can be rebuilt by hand.
 
 ### Launching a *new* network
 
@@ -345,8 +359,9 @@ the resulting hash, and every joining node verifies it independently.
 
 Two things to know before you run it against mainnet parameters:
 
-- **It will not reproduce the shipped mainnet genesis.** `ChainParams::mainnet().genesis_nonce` is
-  `0`, and a nonce of 0 does not meet `0x1d00ffff`. That is deliberate and it is not a defect:
+- **It will not reproduce any of the three shipped genesis blocks.** Every network's
+  `genesis_nonce` is `0`, and a nonce of 0 meets neither `0x1d00ffff` nor `0x1e00ffff`. That is
+  deliberate and it is not a defect:
   SPEC §2 exempts genesis from proof-of-work validation, because there is no parent to validate it
   against, so `ChainManager::init_genesis` never checks it. Grinding a nonce and putting it in the
   params changes `genesis_commitment`, which changes the coinbase, the merkle root and the hash —
@@ -542,18 +557,18 @@ end to end.
 |---|---|---|
 | Node syncs headers then stalls | no peer has bodies for the best header chain | check `chain-cli chain peers`; a peer serving headers it cannot back is disconnected automatically |
 | `genesis mismatch: this datadir holds X, these parameters give Y` on startup | the datadir belongs to a different network, or your `ChainParams` differ from the network's | you are on a different chain — that is the check working. Compare `Y` against §4, then either fix `--network` or use a fresh datadir |
-| Balance is 0 after mining | coinbase outputs are immature for 100 blocks | `chain-cli wallet balance` shows `immature` separately |
+| Balance is 0 after mining | coinbase outputs are immature for `coinbase_maturity` blocks — 100 on mainnet and testnet, 10 on devnet | `chain-cli wallet balance` shows `immature` separately |
 | Balance is 0 and even the address looks unfamiliar | a wrong or missing `--datadir` made a brand-new wallet — `wallet address` creates a keystore when there is none | check `chain-cli --datadir DIR wallet address` against the address you funded; `FERRUM_DATADIR` sets it once for a shell |
 | `getbalance`, `/api/tx` or `/api/address` returns `index disabled` (code `1007`) | the node was started without `--index` | stop the node, run `chain-cli --datadir DIR chain reindex`, restart with `--index`. `/api/stats` reports `index_enabled` so you can check without guessing |
-| `peer served an invalid header: bits 0x… does not match the required 0x…`, then the peer is banned and the node stops advancing | the two nodes have **different blocks at height 1**, which is the ASERT anchor, so each computes a different required target for the other's headers | they are on chains that can never merge. Confirm with `chain-cli block hash 1` on both; the only fix is to wipe the datadir of the node on the losing branch and re-sync from zero. Avoid it by never starting a second miner on an empty store at the same instant as the first — see §2 |
+| `peer served an invalid header: bits 0x… does not match the required 0x…`, then the peer is banned and the node stops advancing | the two nodes disagree about the difficulty rule itself, which since the anchor became genesis can only mean **different `ChainParams`** — a different `genesis_bits`, `target_spacing_ms`, `asert_halflife_s` or `pow_limit` | compare `chain-cli block hash 0` on both. Different genesis hashes mean different networks and there is nothing to merge; rebuild both from the same source tree. (Before the anchor was fixed this was reachable with *identical* parameters, whenever two nodes held different height-1 blocks — see §2) |
 | `block … is already known to be invalid`, forever, after a failed sync | a block was marked `Invalid` in the store during an earlier bad run, and that verdict is sticky | delete the datadir and re-sync; there is no un-invalidate command, deliberately |
 | `mine address "fer1..." could not be decoded` | the `mining.address` prefix does not match `network` | `fer1…` mainnet, `tfer1…` testnet, `rfer1…` devnet |
-| `no genesis nonce satisfied bits 0x1d00ffff in N tries` | `genesis mine` ran out of budget against a real target | raise `--max-tries`; expect ~2³² tries at roughly 1.1 M/s per core. See §4 |
+| `no genesis nonce satisfied bits 0x1d00ffff in N tries` | `genesis mine` ran out of budget against a real target | raise `--max-tries`; expect ~2³² tries at roughly 1.1 M/s per core, or ~2²⁴ against devnet's `0x1e00ffff`. See §4 |
 | `seal declares engine 0 but engine 1 is active at this height` | `--consensus bft` forced BFT at height 0, where genesis carries a PoW seal | drop `--consensus` and use `--consensus-config` with `bft_activation_height` — §6 |
 | `BFT needs at least 4 validators, got 0` | `--consensus bft` without `--consensus-config` | supply the validator set — §6 |
 | `--p2p-listen ... is not a valid libp2p multiaddr`, showing a path like `C:/Program Files/Git/ip4/...` | Git Bash / MSYS2 rewrote the multiaddr into a Windows path | `export MSYS2_ARG_CONV_EXCL="*"` before running the binary. `devnet/lib.sh` already does this; it bites only when you invoke `chaind` by hand from Git Bash |
 | Blocks are never gossiped | gossipsub `max_transmit_size` too small for your block size | the default 64 KiB is overridden to 4 MiB — check you have not lowered it |
-| Mining produces nothing on mainnet | `pow_limit` is genuinely hard | use `--network devnet` to see the machinery work |
+| Mining produces nothing on mainnet | `pow_limit` is genuinely hard — ~2³² hashes, minutes per block per core | use `--network devnet`, which is 256× easier: ~2²⁴ hashes, about 1.9 s per block per core |
 
 Turn up logging with `RUST_LOG=ferrum_node=debug,ferrum_chain=debug,ferrum_p2p=info`, or
 `--log-format json` when shipping to a collector.

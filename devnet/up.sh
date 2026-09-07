@@ -33,7 +33,9 @@ for i in $(seq 1 "$NODES"); do
         continue
     fi
     # Only nodes 1 and 2 mine. Four miners on one laptop just heats the room and
-    # makes the partition demo harder to read.
+    # makes the partition demo harder to read. Two miners at one thread each is
+    # also what devnet's `pow_limit` was measured against: ~1.9 s per block per
+    # thread, so the network seals roughly once a second.
     mine=0; [ "$i" -le 2 ] && mine=1
     start_node "$i" "$mine" $(peers_full "$i")
     printf '  node %s  rpc :%s  p2p :%s  explorer :%s  %s\n' \

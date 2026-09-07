@@ -107,7 +107,12 @@ pub enum ConsensusError {
     #[error("parent header {0} is unknown to this view")]
     UnknownParent(BlockHash),
 
-    /// A header the difficulty rule needs is missing from the view.
+    /// A header a rule needs is missing from the active chain in the view.
+    ///
+    /// The difficulty rule no longer raises this: its ASERT anchor is genesis,
+    /// read from [`ChainParams`](ferrum_types::ChainParams), because an anchor
+    /// resolved through the *active* chain makes difficulty fork-dependent and
+    /// splits the network permanently (CONTRACT 6.3).
     #[error("no header at height {0} on the active chain")]
     MissingHeader(u64),
 

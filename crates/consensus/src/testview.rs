@@ -7,9 +7,33 @@
 
 use std::collections::BTreeMap;
 
-use ferrum_types::{BlockHash, BlockHeader, ChainParams, Hash32};
+use ferrum_types::{BlockHash, BlockHeader, ChainParams, CompactTarget, Hash32};
 
 use crate::engine::{HeaderView, block_hash};
+
+/// Devnet parameters mined at a trivial target: everything `ChainParams::devnet`
+/// says, except that `pow_limit` and `genesis_bits` are the pre-2026 devnet
+/// values, which accept about half of all header hashes.
+///
+/// The shipped devnet limit is `0x1e00ffff` — about `2^24` header hashes per
+/// block, roughly 1.9 s on one core in release and four times that in the
+/// unoptimised test profile. That is deliberate and load-bearing on a real
+/// network (a devnet that seals in a microsecond outruns its own gossip), and
+/// it is pure overhead here: the tests that use this view seal headers to check
+/// that `seal` returns something meeting the target it was handed, that
+/// cancellation is honoured, and that `bits` transitions validate — none of
+/// which depends on how large the target is.
+///
+/// Anything asserting on the shipped numbers must take `ChainParams::devnet()`
+/// directly instead.
+pub(crate) fn easy_devnet_params() -> ChainParams {
+    let mut p = ChainParams::devnet();
+    let mut limit = [0xffu8; 32];
+    limit[0] = 0x7f;
+    p.pow_limit = limit;
+    p.genesis_bits = CompactTarget(0x207f_ffff);
+    p
+}
 
 /// A header chain held entirely in memory.
 #[derive(Debug)]
@@ -33,9 +57,13 @@ impl TestView {
         }
     }
 
-    /// An empty devnet view.
+    /// An empty devnet view, mined at a trivial target.
+    ///
+    /// See [`easy_devnet_params`]: the shipped devnet `pow_limit` costs ~2^24
+    /// hashes per block and nothing reached through this view is about that
+    /// number.
     pub(crate) fn devnet() -> Self {
-        Self::with_params(ChainParams::devnet())
+        Self::with_params(easy_devnet_params())
     }
 
     /// An empty mainnet view.

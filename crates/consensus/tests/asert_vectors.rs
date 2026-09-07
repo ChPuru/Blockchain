@@ -101,11 +101,39 @@ fn asert_vector_file_is_the_shape_the_contract_asks_for() {
     // 2000 copies of the easy case.
     let prefixes: BTreeSet<&str> =
         v.cases.iter().filter_map(|c| c.name.split('_').next()).collect();
-    for regime in
-        ["on", "fast", "slow", "negative", "huge", "clamp", "floor", "random", "params", "anchor"]
-    {
+    for regime in [
+        "on", "fast", "slow", "negative", "huge", "clamp", "floor", "random", "params", "anchor",
+        "genesis",
+    ] {
         assert!(prefixes.contains(regime), "no {regime}* cases in the vector file");
     }
+}
+
+#[test]
+fn asert_vectors_are_anchored_on_genesis() {
+    // The anchor is genesis and comes from `ChainParams`, never from the chain.
+    // A vector file that had drifted back to a height-1 anchor would still pass
+    // every other test here, because both sides would have drifted together.
+    assert_eq!(ferrum_consensus::ANCHOR_HEIGHT, 0, "the ASERT anchor is genesis");
+
+    let v = load();
+    let on_genesis =
+        v.cases.iter().filter(|c| c.anchor_height == ferrum_consensus::ANCHOR_HEIGHT).count();
+    assert!(
+        on_genesis * 2 > v.cases.len(),
+        "only {on_genesis} of {} cases use the real anchor height",
+        v.cases.len()
+    );
+    assert!(
+        v.cases.iter().any(|c| c.parent_height == 0),
+        "the child of genesis is an ordinary case now, and must be covered"
+    );
+    // The deliberately unreachable direction is still exercised, because that
+    // is where the sign of `height_diff` would go wrong unnoticed.
+    assert!(
+        v.cases.iter().any(|c| c.parent_height < c.anchor_height),
+        "no case places the parent below the anchor"
+    );
 }
 
 #[test]
@@ -262,6 +290,11 @@ const BULK_ANCHOR_BITS: u32 = 0x1900_FFFF;
 const BULK_SPACING_S: i64 = 120;
 const BULK_HALFLIFE_S: i64 = 7_200;
 
+/// Anchor height for the sweep: genesis, as consensus uses it. Only
+/// `parent_height - anchor_height` reaches the arithmetic, so this does not
+/// affect [`BULK_DIGEST`] — it is here so the sweep reads like the real rule.
+const BULK_ANCHOR_HEIGHT: u64 = ferrum_consensus::ANCHOR_HEIGHT;
+
 /// Devnet `pow_limit`, `0x7fff…ff`: high enough that a fast chain is not
 /// clipped by the ceiling before the arithmetic has been exercised.
 fn bulk_pow_limit() -> Target {
@@ -306,8 +339,9 @@ fn bulk_pair(draw_a: u64, draw_b: u64, draw_c: u64) -> (i64, i64) {
 
 #[test]
 fn asert_two_hundred_thousand_synthetic_pairs_match_the_python_digest() {
-    let anchor = AsertAnchor::from_compact(CompactTarget(BULK_ANCHOR_BITS), GENESIS_TIME_S, 1)
-        .expect("the anchor bits are canonical");
+    let anchor =
+        AsertAnchor::from_compact(CompactTarget(BULK_ANCHOR_BITS), GENESIS_TIME_S, BULK_ANCHOR_HEIGHT)
+            .expect("the anchor bits are canonical");
     let params = AsertParams {
         target_spacing_s: BULK_SPACING_S,
         halflife_s: BULK_HALFLIFE_S,
@@ -332,7 +366,8 @@ fn asert_two_hundred_thousand_synthetic_pairs_match_the_python_digest() {
         state = next;
 
         let (height_diff, time_diff) = bulk_pair(draw_a, draw_b, draw_c);
-        let parent_height = 1 + u64::try_from(height_diff).expect("non-negative");
+        let parent_height =
+            BULK_ANCHOR_HEIGHT + u64::try_from(height_diff).expect("non-negative");
         let parent_time_s = GENESIS_TIME_S + time_diff;
 
         let exponent =

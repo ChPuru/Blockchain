@@ -42,13 +42,14 @@ impl SimNode {
         Ok(SimNode { store, engines, chain, params })
     }
 
-    /// A devnet node.
+    /// A devnet node, on [`sim_params`](crate::sim_params) — the shipped devnet
+    /// set mined at a trivial target.
     ///
     /// # Errors
     ///
     /// As [`SimNode::open`].
     pub fn devnet() -> Result<Self, SimError> {
-        Self::open(ChainParams::devnet())
+        Self::open(crate::sim_params())
     }
 
     /// The manager under test.

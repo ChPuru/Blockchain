@@ -15,9 +15,21 @@ fn amount(v: u64) -> Amount {
 }
 
 /// Devnet with a half-life short enough that a fast branch is visibly harder.
+///
+/// The tests below mine a side branch one second per block and rely on ASERT
+/// answering with a target several times harder each time, so that four blocks
+/// out-work eight. What produces that is the *ratio* `spacing / half-life`, not
+/// either number alone: at the shipped devnet spacing of 5 s, a half-life of
+/// half a spacing puts a 1 s block 2.5 half-lives ahead of schedule, which is
+/// the same 3x work margin the old 120 s / 60 s pairing gave.
+///
+/// `devnet_with` mines at a trivial base target, which is what keeps this
+/// affordable: these blocks land at up to 90x the base difficulty, and at
+/// devnet's shipped limit a single one of them would be ~2^30 hashes — minutes,
+/// to assert a ratio that does not depend on the absolute target at all.
 fn fast_difficulty() -> ChainParams {
     devnet_with(|p| {
-        p.asert_halflife_s = 60;
+        p.asert_halflife_s = i64::try_from(p.target_spacing_s()).unwrap() / 2;
         p.coinbase_maturity = 1;
     })
 }

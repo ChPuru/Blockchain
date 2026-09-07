@@ -79,23 +79,35 @@ fn a_double_spend_inside_one_block_is_rejected() {
 fn a_coinbase_spent_before_maturity_is_rejected() {
     let params = devnet();
     let (_, prev, _) = scene(&params);
-    let ctx = ctx_at(100, &parent_header(PARENT_MS, &params), MTP_S, &params);
+    // The last height at which the spend is still one block too early. Derived
+    // from the parameters rather than written out, so that retuning devnet's
+    // maturity cannot leave this test asserting the wrong boundary: a coin
+    // mined at height 1 matures at 1 + maturity.
+    let maturity = params.coinbase_maturity;
+    let coin_height = 1;
+    let too_early = coin_height + maturity - 1;
+    let ctx = ctx_at(too_early, &parent_header(PARENT_MS, &params), MTP_S, &params);
     let funded = OutPoint::new(Txid(Hash32::from_bytes([17; 32])), 0);
-    let pre = map_view(&[(funded, coin(amount(1_000), 1, true))]);
+    let pre = map_view(&[(funded, coin(amount(1_000), coin_height, true))]);
 
     let tx = spend(&[funded], &[(amount(900), any_spend_script())]);
-    let block =
-        block_of(vec![coinbase(100, amount(1), b"n"), tx], prev, BLOCK_MS, params.genesis_bits);
+    let block = block_of(
+        vec![coinbase(too_early, amount(1), b"n"), tx],
+        prev,
+        BLOCK_MS,
+        params.genesis_bits,
+    );
     assert_eq!(
         apply_block(&pre, &block, &ctx),
         Err(ValidationError::ImmatureCoinbaseSpend {
             tx_index: 1,
             out_point: funded,
-            coin_height: 1,
-            spend_height: 100,
-            maturity: 100,
+            coin_height,
+            spend_height: too_early,
+            maturity,
         }),
-        "height 1 + 100 = 101, so height 100 is one block too early"
+        "{coin_height} + {maturity} = {}, so height {too_early} is one block too early",
+        coin_height + maturity
     );
 }
 

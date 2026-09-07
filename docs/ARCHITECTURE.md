@@ -208,7 +208,7 @@ connect_tip_block(store, params, engines, hash)
   │     │
   │     └─ for each non-coinbase tx, in block order:
   │          · overlay.get_coin(prev_out)     absent ─► MissingInput
-  │          · coinbase maturity: height >= coin.height + 100
+  │          · coinbase maturity: height >= coin.height + coinbase_maturity
   │          · sum(inputs) >= sum(outputs), every step checked_*
   │          · is_final(tx, height, mtp_s)
   │          · script::verify(script_sig, coin.script_pubkey, ExecCtx)

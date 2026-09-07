@@ -7,6 +7,17 @@ implementations written from the same paragraph still catch a misreading of that
 paragraph, and one does not.  That is this project's substitute for an audit of
 the difficulty controller.
 
+The anchor is **genesis**: `anchor_height = 0`, `anchor_target` from
+`params.genesis_bits`, `anchor_time_s` from `params.genesis_timestamp_ms`.  All
+three come out of the parameter set, so every node has byte-identical anchor
+values before it has spoken to a peer.  Anchoring on a block read out of the
+chain -- "the block at height 1 on the active chain", as this was originally
+specified -- makes difficulty fork-dependent: two nodes holding different blocks
+at the anchor height compute different required `bits` for each other's headers,
+reject them, and fork permanently, because a header that fails validation never
+reaches fork choice.  Bitcoin Cash's `aserti3-2d` pins a fixed anchor for exactly
+this reason.
+
 Everything here is exact integer arithmetic.  Python's ints are arbitrary
 precision, so there is no overflow to reason about -- which is exactly why it is
 a useful cross-check against a Rust implementation that has to bound every
@@ -59,8 +70,12 @@ CUBIC_SHIFT = 48
 COMPACT_MANTISSA_MASK = 0x00FFFFFF
 COMPACT_SIGN_BIT = 0x00800000
 
-#: The height the schedule is anchored at: the first block after genesis.
-ANCHOR_HEIGHT = 1
+#: The height the schedule is anchored at: genesis.  Fixed by ChainParams,
+#: identical on every node, and impossible to reorg away.  Genesis itself is the
+#: only block exempt from the difficulty-transition rule, and only because it has
+#: no parent; its child at height 1 is on the ASERT schedule like every other
+#: block.  See the module docstring for why this may not be read from the chain.
+ANCHOR_HEIGHT = 0
 
 #: Mainnet / testnet pow_limit: 0x00000000ffff0000...
 POW_LIMIT_MAINNET = int("00000000ffff" + "0" * 52, 16)
@@ -282,6 +297,9 @@ def asert_next_bits(
 # Vector generation
 # --------------------------------------------------------------------------
 
+#: The anchor timestamp for the generated vectors: `genesis_timestamp_ms / 1000`
+#: for every Ferrum network, 2025-01-01T00:00:00Z.  The anchor is genesis, so
+#: this is literally the anchor time a node uses.
 GENESIS_TIME_S = 1_735_689_600  # 2025-01-01T00:00:00Z
 SPACING_S = 120
 HALFLIFE_S = 7_200
@@ -348,7 +366,8 @@ def generate_cases() -> list[dict]:
     cases: list[dict] = []
 
     # 1. Perfectly on schedule.  The exponent is a constant -1092 here, so the
-    #    bits must be identical for every one of these.
+    #    bits must be identical for every one of these -- including i = 0, the
+    #    child of genesis, which is on the schedule like every other block.
     for i in range(0, 3000, 10):
         height = ANCHOR_HEIGHT + i
         cases.append(
@@ -446,13 +465,36 @@ def generate_cases() -> list[dict]:
                 )
             )
 
-    # 10. A non-default anchor height, so nothing silently assumes 1.
+    # 10. A non-default anchor height, so nothing silently assumes 0.
     for i in range(0, 60):
         cases.append(
             _case("anchor_at_1000_%d" % i, 0x1900FFFF,
                   GENESIS_TIME_S + SPACING_S * i, 1000 + i,
                   anchor_height=1000, anchor_time_s=GENESIS_TIME_S)
         )
+
+    # 11. Parents *below* the anchor, i.e. a negative height_diff.  Consensus
+    #     never sees one now that the anchor is genesis and nothing precedes
+    #     genesis, but the arithmetic still has to be total and a negative
+    #     height_diff is exactly where a sign error hides.
+    for i in range(0, 60):
+        cases.append(
+            _case("anchor_above_the_parent_%d" % i, 0x1900FFFF,
+                  GENESIS_TIME_S - SPACING_S * i, 1000 - i,
+                  anchor_height=1000, anchor_time_s=GENESIS_TIME_S)
+        )
+
+    # 12. The genesis anchor exactly as a node uses it: anchor_height 0, the
+    #     anchor timestamp straight from the parameters, and the first dozen
+    #     heights of a fresh chain.  Height 0 as the parent is the child of
+    #     genesis -- the case that used to be exempt from the rule because the
+    #     anchor did not exist yet, and is not exempt any more.
+    for bits in ANCHOR_BITS:
+        for height in range(0, 12):
+            cases.append(
+                _case("genesis_anchor_%08x_h%d" % (bits, height), bits,
+                      GENESIS_TIME_S + SPACING_S * height, height)
+            )
 
     return cases
 
@@ -724,30 +766,54 @@ def selftest() -> int:
     anchor_target = compact_to_target(anchor_bits)
     limit = POW_LIMIT_MAINNET
 
-    # On schedule, bits are constant.
-    first = asert_next_bits(anchor_bits, GENESIS_TIME_S, 1, GENESIS_TIME_S, 1,
+    # The anchor is genesis, and genesis is the only exempt block.
+    check(ANCHOR_HEIGHT == 0, "the anchor is genesis, not the block after it")
+
+    # On schedule, bits are constant -- and i = 0 is the child of genesis, which
+    # is on the schedule like every other block rather than exempt from it.
+    first = asert_next_bits(anchor_bits, GENESIS_TIME_S, ANCHOR_HEIGHT,
+                            GENESIS_TIME_S, ANCHOR_HEIGHT,
                             SPACING_S, HALFLIFE_S, limit)
     for i in range(0, 2000, 7):
-        bits = asert_next_bits(anchor_bits, GENESIS_TIME_S, 1,
-                               GENESIS_TIME_S + SPACING_S * i, 1 + i,
+        bits = asert_next_bits(anchor_bits, GENESIS_TIME_S, ANCHOR_HEIGHT,
+                               GENESIS_TIME_S + SPACING_S * i, ANCHOR_HEIGHT + i,
                                SPACING_S, HALFLIFE_S, limit)
         check(bits == first, "on-schedule bits must not drift at i = %d" % i)
+    check(
+        asert_exponent(GENESIS_TIME_S, ANCHOR_HEIGHT, GENESIS_TIME_S, ANCHOR_HEIGHT,
+                       SPACING_S, HALFLIFE_S) == -1092,
+        "the child of genesis carries the one-spacing on-schedule offset",
+    )
+
+    # Difficulty is a pure function of (parent_height, parent_time_s, params):
+    # there is no third input a node could disagree about, which is the whole
+    # reason the anchor moved to genesis.
+    for parent_height, parent_time in [(0, GENESIS_TIME_S), (1, GENESIS_TIME_S + 300),
+                                       (17, GENESIS_TIME_S + 2039)]:
+        answers = {
+            asert_next_bits(anchor_bits, GENESIS_TIME_S, ANCHOR_HEIGHT,
+                            parent_time, parent_height, SPACING_S, HALFLIFE_S, limit)
+            for _ in range(3)
+        }
+        check(len(answers) == 1, "difficulty must depend only on (parent, params)")
 
     # Exactly n half-lives ahead of schedule doubles the target n times.
     for halflives in range(0, 6):
-        parent_height = 1 + 1000
+        parent_height = ANCHOR_HEIGHT + 1000
         parent_time = GENESIS_TIME_S + SPACING_S * 1001 + HALFLIFE_S * halflives
-        target = asert_next_target(anchor_target, GENESIS_TIME_S, 1, parent_time,
-                                   parent_height, SPACING_S, HALFLIFE_S, limit)
+        target = asert_next_target(anchor_target, GENESIS_TIME_S, ANCHOR_HEIGHT,
+                                   parent_time, parent_height, SPACING_S,
+                                   HALFLIFE_S, limit)
         check(
             target == min(anchor_target << halflives, limit),
             "%d half-lives must be an exact doubling" % halflives,
         )
     for halflives in range(0, 6):
-        parent_height = 1 + 1000
+        parent_height = ANCHOR_HEIGHT + 1000
         parent_time = GENESIS_TIME_S + SPACING_S * 1001 - HALFLIFE_S * halflives
-        target = asert_next_target(anchor_target, GENESIS_TIME_S, 1, parent_time,
-                                   parent_height, SPACING_S, HALFLIFE_S, limit)
+        target = asert_next_target(anchor_target, GENESIS_TIME_S, ANCHOR_HEIGHT,
+                                   parent_time, parent_height, SPACING_S,
+                                   HALFLIFE_S, limit)
         check(
             target == anchor_target >> halflives,
             "-%d half-lives must be an exact halving" % halflives,
@@ -757,15 +823,18 @@ def selftest() -> int:
     for bits in ANCHOR_BITS:
         target = compact_to_target(bits)
         pow_limit = _pow_limit_for(bits)
-        far = asert_next_target(target, GENESIS_TIME_S, 1, GENESIS_TIME_S + 10**18, 2,
+        far = asert_next_target(target, GENESIS_TIME_S, ANCHOR_HEIGHT,
+                                GENESIS_TIME_S + 10**18, ANCHOR_HEIGHT + 1,
                                 SPACING_S, HALFLIFE_S, pow_limit)
         check(far == pow_limit, "a huge gap must clamp to pow_limit")
-        near = asert_next_target(target, GENESIS_TIME_S, 1, GENESIS_TIME_S - 10**18, 2,
+        near = asert_next_target(target, GENESIS_TIME_S, ANCHOR_HEIGHT,
+                                 GENESIS_TIME_S - 10**18, ANCHOR_HEIGHT + 1,
                                  SPACING_S, HALFLIFE_S, pow_limit)
         check(near == 1, "a huge negative gap must floor at 1")
         check(
-            asert_next_target(target, GENESIS_TIME_S, 1, 2**62, 2, SPACING_S,
-                              HALFLIFE_S, pow_limit) == pow_limit,
+            asert_next_target(target, GENESIS_TIME_S, ANCHOR_HEIGHT, 2**62,
+                              ANCHOR_HEIGHT + 1, SPACING_S, HALFLIFE_S,
+                              pow_limit) == pow_limit,
             "the clamp must be reachable from any anchor",
         )
 
@@ -773,21 +842,23 @@ def selftest() -> int:
     for bits in ANCHOR_BITS:
         target = compact_to_target(bits)
         pow_limit = _pow_limit_for(bits)
-        a = asert_next_target(target, 0, 1, 10**15, 2, SPACING_S, HALFLIFE_S, pow_limit)
-        b = asert_next_target(target, 0, 1, 10**17, 2, SPACING_S, HALFLIFE_S, pow_limit)
+        a = asert_next_target(target, 0, ANCHOR_HEIGHT, 10**15, ANCHOR_HEIGHT + 1,
+                              SPACING_S, HALFLIFE_S, pow_limit)
+        b = asert_next_target(target, 0, ANCHOR_HEIGHT, 10**17, ANCHOR_HEIGHT + 1,
+                              SPACING_S, HALFLIFE_S, pow_limit)
         check(a == b, "past the clamp every answer must agree")
 
     # Monotonicity: later parents are easier, taller parents are harder.
     previous = 0
     for extra in range(0, 20_000, 200):
-        target = asert_next_target(anchor_target, GENESIS_TIME_S, 1,
+        target = asert_next_target(anchor_target, GENESIS_TIME_S, ANCHOR_HEIGHT,
                                    GENESIS_TIME_S + extra, 500, SPACING_S,
                                    HALFLIFE_S, limit)
         check(target >= previous, "the target must be monotone in parent time")
         previous = target
     previous = limit
-    for height in range(1, 2000, 20):
-        target = asert_next_target(anchor_target, GENESIS_TIME_S, 1,
+    for height in range(ANCHOR_HEIGHT, 2000, 20):
+        target = asert_next_target(anchor_target, GENESIS_TIME_S, ANCHOR_HEIGHT,
                                    GENESIS_TIME_S + 100_000, height, SPACING_S,
                                    HALFLIFE_S, limit)
         check(target <= previous, "the target must be antitone in parent height")
@@ -803,9 +874,9 @@ def selftest() -> int:
         arguments = {
             "anchor_target": anchor_target,
             "anchor_time_s": GENESIS_TIME_S,
-            "anchor_height": 1,
+            "anchor_height": ANCHOR_HEIGHT,
             "parent_time_s": GENESIS_TIME_S,
-            "parent_height": 1,
+            "parent_height": ANCHOR_HEIGHT,
             "target_spacing_s": SPACING_S,
             "halflife_s": HALFLIFE_S,
             "pow_limit": limit,

@@ -13,6 +13,29 @@
 //! be driven by an alternating-timestamp attack, and self-corrects after a
 //! manipulated timestamp instead of amplifying it.
 //!
+//! # The anchor is genesis, and it is read from `ChainParams` (CONTRACT 6.3)
+//!
+//! [`ANCHOR_HEIGHT`] is `0`. [`AsertAnchor::genesis`] builds the anchor from
+//! [`ChainParams::genesis_bits`] and [`ChainParams::genesis_timestamp_ms`], so
+//! every node on a network has byte-identical anchor values by construction and
+//! the required `bits` for a header is a pure function of
+//! `(parent_height, parent_time_s, params)`.
+//!
+//! **The anchor must never be read out of the chain.** This was originally
+//! specified and implemented as "the block at height 1, via
+//! `HeaderView::header_at_height`", and that is a consensus bug: that method is
+//! defined as the *active* chain, so two nodes that sealed different height-1
+//! blocks compute different required `bits` for each other's headers, reject
+//! them as [`ConsensusError::BadDifficultyTransition`], and ban each other. The
+//! resulting fork is permanent and unrecoverable, because a header that fails
+//! validation never reaches fork choice at all — there is no reorg path out.
+//! It is not a small-network artefact either: *any* two nodes that disagree
+//! about the anchor disagree about difficulty forever. Bitcoin Cash's
+//! `aserti3-2d` pins a fixed anchor for exactly this reason.
+//!
+//! Genesis is the only block every node is guaranteed to agree on before it has
+//! spoken to anybody, which is what makes it the one safe anchor.
+//!
 //! # The algorithm (CONTRACT 6.3, SPEC 6.2)
 //!
 //! ```text
@@ -76,12 +99,17 @@ use primitive_types::U256;
 use crate::error::ConsensusError;
 use crate::target::{Target, shl_u512, shr_u512, target_to_compact, widening_mul};
 
-/// The height ASERT measures everything from: the first block after genesis.
+/// The height ASERT measures everything from: **genesis**.
 ///
-/// Genesis has no parent and therefore no measurable interval, so the schedule
-/// starts one block later. For child heights at or below this the target is
-/// simply `params.genesis_bits`.
-pub const ANCHOR_HEIGHT: u64 = 1;
+/// Genesis is fixed by [`ChainParams`], identical on every node before any of
+/// them has seen a peer, and can never be reorged away. Anchoring anywhere else
+/// — including height 1 — makes the difficulty rule fork-dependent and splits
+/// the network permanently; see the module docs.
+///
+/// Genesis itself is the only block exempt from the difficulty-transition rule,
+/// and only because it has no parent to transition from. Its child, at height
+/// 1, gets an ASERT target like every other block.
+pub const ANCHOR_HEIGHT: u64 = 0;
 
 /// Fixed-point radix: the exponent is in units of `1 / 65536` half-lives.
 pub const RADIX: i64 = 65_536;
@@ -112,16 +140,23 @@ const MAX_ACCUMULATOR_BITS: u32 = 272;
 
 /// The anchor block: the fixed point the whole difficulty schedule hangs from.
 ///
-/// It is the block at [`ANCHOR_HEIGHT`], carrying **its own** `bits` and
-/// `timestamp_ms`. Nothing about it is recomputed as the chain grows, which is
-/// what makes ASERT stateless with respect to recent history.
+/// On a live chain it is genesis — [`AsertAnchor::genesis`] — carrying the
+/// `bits` and timestamp that [`ChainParams`] states. Nothing about it is
+/// recomputed as the chain grows and nothing about it is read from a
+/// [`HeaderView`](crate::HeaderView), which is what makes ASERT both stateless
+/// with respect to recent history and independent of which fork the reader is
+/// on.
+///
+/// The fields stay public and [`AsertAnchor::from_compact`] stays general so
+/// that the cross-check vectors can drive the algorithm from an arbitrary
+/// anchor; consensus itself only ever uses [`AsertAnchor::genesis`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AsertAnchor {
     /// The anchor block's expanded target.
     pub target: Target,
     /// The anchor block's timestamp, in **seconds**.
     pub time_s: i64,
-    /// The anchor block's height, normally [`ANCHOR_HEIGHT`].
+    /// The anchor block's height, [`ANCHOR_HEIGHT`] on a live chain.
     pub height: u64,
 }
 
@@ -137,6 +172,32 @@ impl AsertAnchor {
         height: u64,
     ) -> Result<Self, ConsensusError> {
         Ok(AsertAnchor { target: crate::target::compact_to_target(bits)?, time_s, height })
+    }
+
+    /// The one anchor consensus uses: genesis, straight out of [`ChainParams`].
+    ///
+    /// `target = compact_to_target(params.genesis_bits)`,
+    /// `time_s = params.genesis_timestamp_ms / 1000`, `height =`
+    /// [`ANCHOR_HEIGHT`]. No chain is read, so this cannot fail for a missing
+    /// header and cannot return two different answers to two nodes holding
+    /// different forks. That is the whole point (CONTRACT 6.3).
+    ///
+    /// # Errors
+    ///
+    /// [`ConsensusError`] variants from
+    /// [`compact_to_target`](crate::compact_to_target) when `genesis_bits` is
+    /// not a valid compact target — a malformed parameter set, never a
+    /// chain-state condition.
+    pub fn genesis(params: &ChainParams) -> Result<Self, ConsensusError> {
+        // Milliseconds to seconds, truncating, matching `BlockHeader::timestamp_s`.
+        let time_s = params.genesis_timestamp_ms.checked_div(1_000).unwrap_or(0);
+        // A genesis timestamp beyond i64 seconds is 292 billion years out; the
+        // saturation keeps the ordering rather than wrapping into the past.
+        AsertAnchor::from_compact(
+            params.genesis_bits,
+            i64::try_from(time_s).unwrap_or(i64::MAX),
+            ANCHOR_HEIGHT,
+        )
     }
 }
 
@@ -796,7 +857,81 @@ mod tests {
 
         let d = AsertParams::from_chain_params(&ChainParams::devnet());
         assert_eq!(d.pow_limit, Target::from_be_bytes(&ChainParams::devnet().pow_limit));
-        assert!(d.pow_limit > compact_to_target(CompactTarget(0x207f_ffff)).unwrap());
+        // Read the devnet limit off the parameters rather than pinning a
+        // literal: which compact value devnet uses is that crate's business,
+        // and the only thing ASERT cares about is that it is far easier than
+        // mainnet's.
+        assert_eq!(d.pow_limit, compact_to_target(ChainParams::devnet().genesis_bits).unwrap());
+        assert!(d.pow_limit > p.pow_limit, "devnet must be far easier to mine than mainnet");
+    }
+
+    #[test]
+    fn the_anchor_is_genesis_and_is_built_only_from_chain_params() {
+        for params in [ChainParams::mainnet(), ChainParams::testnet(), ChainParams::devnet()] {
+            let a = AsertAnchor::genesis(&params).unwrap();
+            assert_eq!(a.height, 0, "the anchor is genesis, not the block after it");
+            assert_eq!(a.height, ANCHOR_HEIGHT);
+            assert_eq!(a.target, compact_to_target(params.genesis_bits).unwrap());
+            assert_eq!(a.time_s, i64::try_from(params.genesis_timestamp_ms / 1_000).unwrap());
+            // The anchor is a pure function of the parameters: same params in,
+            // same anchor out, every time, on every node.
+            assert_eq!(a, AsertAnchor::genesis(&params).unwrap());
+        }
+    }
+
+    #[test]
+    fn a_different_genesis_moves_the_anchor_and_nothing_else_does() {
+        let mut params = ChainParams::devnet();
+        let base = AsertAnchor::genesis(&params).unwrap();
+
+        params.genesis_timestamp_ms += 60_000;
+        let later = AsertAnchor::genesis(&params).unwrap();
+        assert_eq!(later.time_s, base.time_s + 60);
+        assert_eq!(later.target, base.target);
+        assert_eq!(later.height, ANCHOR_HEIGHT);
+
+        params.genesis_bits = CompactTarget(0x1d00_ffff);
+        let harder = AsertAnchor::genesis(&params).unwrap();
+        assert_eq!(harder.target, compact_to_target(CompactTarget(0x1d00_ffff)).unwrap());
+        assert!(harder.target < base.target);
+    }
+
+    #[test]
+    fn a_genesis_timestamp_truncates_to_whole_seconds() {
+        let mut params = ChainParams::devnet();
+        params.genesis_timestamp_ms = 1_735_689_600_999;
+        assert_eq!(AsertAnchor::genesis(&params).unwrap().time_s, 1_735_689_600);
+    }
+
+    #[test]
+    fn an_unexpandable_genesis_bits_is_a_parameter_error_not_a_chain_error() {
+        let mut params = ChainParams::devnet();
+        params.genesis_bits = CompactTarget(0x1d80_ffff);
+        assert_eq!(
+            AsertAnchor::genesis(&params),
+            Err(ConsensusError::NegativeTarget(0x1d80_ffff))
+        );
+    }
+
+    #[test]
+    fn the_child_of_genesis_is_on_the_asert_schedule_like_every_other_block() {
+        // Height 1 is *not* exempt: the anchor is genesis itself, so the very
+        // first child already carries one spacing of built-in offset — the same
+        // -1092 exponent every on-schedule block has.
+        let params = ChainParams::mainnet();
+        let a = AsertAnchor::genesis(&params).unwrap();
+        let p = mainnet_params();
+        let anchor_time = i64::try_from(params.genesis_timestamp_ms / 1_000).unwrap();
+
+        let e = asert_exponent(&a, anchor_time, 0, &p).unwrap();
+        assert_eq!(e, -1_092, "the child of genesis is one spacing behind the schedule");
+
+        let child_of_genesis = asert_next_bits(&a, anchor_time, 0, &p).unwrap();
+        let tenth_block = asert_next_bits(&a, anchor_time + 9 * SPACING, 9, &p).unwrap();
+        assert_eq!(
+            child_of_genesis, tenth_block,
+            "an on-schedule height 1 must land on the same target as any other on-schedule block"
+        );
     }
 
     proptest! {

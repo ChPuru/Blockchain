@@ -19,12 +19,29 @@
 //!
 //! The cheap checks come first on purpose: an implementation that hashes before
 //! it has checked `bits` lets a peer spend our CPU for free.
+//!
+//! # The difficulty rule reads the parameters, not the chain
+//!
+//! [`PowEngine::anchor`] builds the ASERT anchor from [`ChainParams`] alone —
+//! genesis. The only thing `next_bits` asks the [`HeaderView`] for is the
+//! parent's *height*, which is a fact about the block rather than about which
+//! fork the reader is standing on. So the required `bits` for a header is a
+//! pure function of `(parent_height, parent_timestamp, params)`, and two nodes
+//! holding different chains still agree on it.
+//!
+//! That is not a nicety. An anchor read through
+//! [`HeaderView::header_at_height`] — the *active* chain — makes difficulty
+//! fork-dependent: two nodes that sealed different blocks at the anchor height
+//! reject each other's headers as
+//! [`ConsensusError::BadDifficultyTransition`] and ban each other, and the
+//! split is permanent because a header that fails validation never reaches fork
+//! choice (CONTRACT 6.3).
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use ferrum_types::{Block, BlockHeader, BlockSeal, ChainParams, CompactTarget};
 
-use crate::asert::{ANCHOR_HEIGHT, AsertAnchor, AsertParams, asert_next_bits};
+use crate::asert::{AsertAnchor, AsertParams, asert_next_bits};
 use crate::engine::{BlockTemplate, ConsensusEngine, HeaderView, MIN_BLOCK_VERSION, block_hash};
 use crate::error::ConsensusError;
 use crate::target::{Target, Work, compact_to_target, hash_meets_target, work_from_target};
@@ -100,21 +117,28 @@ impl PowEngine {
         }
     }
 
-    /// The ASERT anchor for this chain: the block at [`ANCHOR_HEIGHT`].
+    /// The ASERT anchor for this chain: **genesis**, read from
+    /// [`ChainParams`] and from nothing else.
+    ///
+    /// This deliberately takes no [`HeaderView`]. An anchor resolved through
+    /// [`HeaderView::header_at_height`] is an anchor on the *active* chain, and
+    /// that makes the difficulty rule fork-dependent: two nodes holding
+    /// different blocks at the anchor height compute different required `bits`
+    /// for each other's headers, reject them as
+    /// [`ConsensusError::BadDifficultyTransition`], and fork permanently — a
+    /// header that fails validation never reaches fork choice, so there is no
+    /// reorg path back together. Genesis is fixed by the parameters, so every
+    /// node has the same anchor before it has spoken to anyone (CONTRACT 6.3).
+    ///
+    /// Because nothing is read from the chain there is no "the anchor header is
+    /// missing" failure any more; the only way this fails is a parameter set
+    /// whose `genesis_bits` is not a valid compact target.
     ///
     /// # Errors
     ///
-    /// [`ConsensusError::MissingHeader`] when the view has no active-chain
-    /// header at the anchor height.
-    pub fn anchor(&self, view: &dyn HeaderView) -> Result<AsertAnchor, ConsensusError> {
-        let header = view
-            .header_at_height(ANCHOR_HEIGHT)
-            .ok_or(ConsensusError::MissingHeader(ANCHOR_HEIGHT))?;
-        AsertAnchor::from_compact(
-            header.bits,
-            i64::try_from(header.timestamp_s()).unwrap_or(i64::MAX),
-            ANCHOR_HEIGHT,
-        )
+    /// Propagates [`compact_to_target`] for a malformed `params.genesis_bits`.
+    pub fn anchor(&self) -> Result<AsertAnchor, ConsensusError> {
+        AsertAnchor::genesis(&self.params)
     }
 }
 
@@ -191,15 +215,17 @@ impl ConsensusEngine for PowEngine {
         let parent_height =
             view.height_of(&parent_hash).ok_or(ConsensusError::UnknownParent(parent_hash))?;
 
-        // Genesis and the anchor itself carry the genesis target: the anchor is
-        // the block at height 1, so there is nothing to measure against until
-        // it exists (CONTRACT 6.3).
-        let child_height = parent_height.saturating_add(1);
-        if child_height <= ANCHOR_HEIGHT {
-            return Ok(self.params.genesis_bits);
-        }
-
-        let anchor = self.anchor(view)?;
+        // Genesis, at height ANCHOR_HEIGHT == 0, is the one block exempt from
+        // the difficulty-transition rule, and only because it has no parent to
+        // transition from — so this function is never asked about it. Every
+        // child height, height 1 included, is on the ASERT schedule
+        // (CONTRACT 6.3).
+        //
+        // The view supplies the parent's *height*, which is a fact about the
+        // block, not about which fork the reader is on. Nothing else here
+        // touches the chain: the anchor comes from the parameters, so two nodes
+        // on two forks compute the same answer for the same parent.
+        let anchor = self.anchor()?;
         let parent_time_s = i64::try_from(parent.timestamp_s()).unwrap_or(i64::MAX);
         asert_next_bits(&anchor, parent_time_s, parent_height, &self.asert_params())
     }
@@ -249,14 +275,21 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     #![allow(clippy::arithmetic_side_effects)]
 
-    use ferrum_types::{Hash32, Transaction};
+    use ferrum_types::{BlockHash, Hash32, Transaction};
 
     use super::*;
+    use crate::asert::ANCHOR_HEIGHT;
     use crate::engine::block_hash;
-    use crate::testview::TestView;
+    use crate::testview::{TestView, easy_devnet_params};
 
+    /// The engine under test: devnet, mined at a trivial target so that a test
+    /// which seals a dozen headers takes milliseconds rather than a minute.
+    /// See [`easy_devnet_params`]. It pairs with [`TestView::devnet`], which
+    /// carries the same parameters — the view supplies the headers and the
+    /// engine reads `pow_limit` and `genesis_bits` from its own copy, so the
+    /// two must agree.
     fn devnet() -> PowEngine {
-        PowEngine::new(ChainParams::devnet())
+        PowEngine::new(easy_devnet_params())
     }
 
     fn template(header: BlockHeader, height: u64) -> BlockTemplate {
@@ -265,11 +298,14 @@ mod tests {
 
     #[test]
     fn identity_matches_the_contract() {
-        let e = devnet();
+        // The shipped parameter set, not the relaxed fixture: `pow_limit` is
+        // read straight off `ChainParams`, and this is the test that says so.
+        let e = PowEngine::new(ChainParams::devnet());
         assert_eq!(e.name(), "pow");
         assert_eq!(e.engine_id(), BlockSeal::ENGINE_POW);
         assert_eq!(e.params().network, ChainParams::devnet().network);
         assert_eq!(e.pow_limit(), Target::from_be_bytes(&ChainParams::devnet().pow_limit));
+        assert_eq!(e.pow_limit(), compact_to_target(ChainParams::devnet().genesis_bits).unwrap());
     }
 
     #[test]
@@ -326,11 +362,40 @@ mod tests {
     }
 
     #[test]
-    fn next_bits_is_the_genesis_target_for_the_first_two_heights() {
+    fn the_anchor_is_genesis_and_is_read_from_the_parameters_alone() {
+        for params in [ChainParams::mainnet(), ChainParams::testnet(), ChainParams::devnet()] {
+            let e = PowEngine::new(params.clone());
+            let anchor = e.anchor().unwrap();
+            assert_eq!(anchor.height, ANCHOR_HEIGHT);
+            assert_eq!(anchor.height, 0, "the anchor is genesis, not the block after it");
+            assert_eq!(anchor.target, compact_to_target(params.genesis_bits).unwrap());
+            assert_eq!(anchor.time_s, i64::try_from(params.genesis_timestamp_ms / 1_000).unwrap());
+        }
+    }
+
+    #[test]
+    fn next_bits_puts_the_child_of_genesis_on_the_asert_schedule() {
+        // Height 1 used to be exempt, because the anchor was the block at
+        // height 1 and it did not exist yet. With the anchor at genesis there
+        // is nothing to wait for: the first child is on the schedule like every
+        // other block, and its target is *not* simply `genesis_bits`.
         let mut view = TestView::devnet();
         let genesis = view.push_genesis();
         let e = devnet();
-        assert_eq!(e.next_bits(&genesis, &view).unwrap(), ChainParams::devnet().genesis_bits);
+
+        let expected = asert_next_bits(
+            &AsertAnchor::genesis(e.params()).unwrap(),
+            i64::try_from(genesis.timestamp_s()).unwrap(),
+            0,
+            &e.asert_params(),
+        )
+        .unwrap();
+        assert_eq!(e.next_bits(&genesis, &view).unwrap(), expected);
+        assert_ne!(
+            e.next_bits(&genesis, &view).unwrap(),
+            ChainParams::devnet().genesis_bits,
+            "the child of genesis is one spacing behind schedule, so its target is not genesis_bits"
+        );
     }
 
     #[test]
@@ -343,39 +408,234 @@ mod tests {
     }
 
     #[test]
-    fn next_bits_needs_the_anchor_header() {
-        // A view that knows the parent's height but has lost height 1.
+    fn next_bits_needs_no_header_but_the_parent_it_was_handed() {
+        // This replaces a test that asserted the opposite — that losing the
+        // header at height 1 broke the difficulty rule. That failure mode was
+        // the bug: whichever header sat at the anchor height decided the answer.
+        // A view that has forgotten every height mapping must now still answer.
         let mut view = TestView::devnet();
         view.push_genesis();
         let parent = view.push_child(120_000);
         view.push_child(240_000);
-        view.forget_height(ANCHOR_HEIGHT);
-        let err = devnet().next_bits(&parent, &view).unwrap_err();
-        assert_eq!(err, ConsensusError::MissingHeader(ANCHOR_HEIGHT));
-        assert!(err.is_missing_context());
+        for height in 0..=2 {
+            view.forget_height(height);
+        }
+
+        let e = devnet();
+        let expected = asert_next_bits(
+            &AsertAnchor::genesis(e.params()).unwrap(),
+            i64::try_from(parent.timestamp_s()).unwrap(),
+            1,
+            &e.asert_params(),
+        )
+        .unwrap();
+        assert_eq!(e.next_bits(&parent, &view).unwrap(), expected);
     }
 
     #[test]
-    fn next_bits_follows_asert_from_the_anchor() {
+    fn next_bits_follows_asert_from_the_genesis_anchor() {
         let mut view = TestView::devnet();
         view.push_genesis();
-        let anchor = view.push_child(120_000);
+        view.push_child(120_000);
         let parent = view.push_child(240_000);
 
         let e = devnet();
         let expected = asert_next_bits(
-            &AsertAnchor::from_compact(
-                anchor.bits,
-                i64::try_from(anchor.timestamp_s()).unwrap(),
-                ANCHOR_HEIGHT,
-            )
-            .unwrap(),
+            &AsertAnchor::genesis(e.params()).unwrap(),
             i64::try_from(parent.timestamp_s()).unwrap(),
             2,
             &e.asert_params(),
         )
         .unwrap();
         assert_eq!(e.next_bits(&parent, &view).unwrap(), expected);
+    }
+
+    /// A network whose difficulty has room to move in both directions, and
+    /// whose blocks cost a couple of hundred hashes.
+    ///
+    /// Both numbers are pinned here rather than inherited from devnet, for two
+    /// reasons. Devnet pins `genesis_bits` *at* its own `pow_limit`, so every
+    /// answer slower than schedule saturates there and they all look alike —
+    /// which would make the fork test below pass for the wrong reason. And
+    /// devnet's cost per block is tuned for a four-node laptop network, not for
+    /// a unit test that seals four headers; borrowing it would make this test's
+    /// runtime track a number that has nothing to do with what it asserts.
+    ///
+    /// `0x2000ffff` is `2^-8` of the limit below, so ASERT has 128x of headroom
+    /// before it clamps, and a block costs about 256 hashes.
+    fn forkable_devnet() -> ChainParams {
+        let mut params = ChainParams::devnet();
+        params.genesis_bits = CompactTarget(0x2000_ffff);
+        params.pow_limit = [0xff; 32];
+        params.pow_limit[0] = 0x7f;
+        params
+    }
+
+    #[test]
+    fn the_anchor_does_not_depend_on_which_fork_you_are_on() {
+        // Two nodes seal different — both valid — blocks at height 1, which is
+        // what devnet does on almost every run: the pow_limit is so easy that
+        // each node seals its own height 1 before libp2p has dialled anyone.
+        //
+        // The old rule read the anchor out of the chain, through
+        // `header_at_height(1)`, which is defined as the *active* chain. Each
+        // node therefore anchored on its own height-1 block, computed a
+        // different required `bits` for the other's headers, rejected them as
+        // BadDifficultyTransition and banned the peer — permanently, because a
+        // header that fails validation never reaches fork choice.
+        let params = forkable_devnet();
+        let e = PowEngine::new(params.clone());
+        let cancel = AtomicBool::new(false);
+
+        let mut left = TestView::with_params(params.clone());
+        let mut right = TestView::with_params(params.clone());
+        let genesis = left.push_genesis();
+        assert_eq!(block_hash(&right.push_genesis()), block_hash(&genesis), "one genesis");
+
+        // Two valid height-1 headers: different transactions, and timestamps a
+        // whole half-life apart, so a chain-read anchor would have differed in
+        // every field it read.
+        let bits1 = e.next_bits(&genesis, &left).unwrap();
+        let seal_height_1 = |merkle: u8, delta_ms: u64| -> BlockHeader {
+            let header = BlockHeader {
+                version: 1,
+                prev_hash: block_hash(&genesis),
+                merkle_root: Hash32::from_bytes([merkle; 32]),
+                timestamp_ms: genesis.timestamp_ms + delta_ms,
+                bits: bits1,
+                nonce: 0,
+            };
+            e.seal(template(header, 1), &cancel).unwrap().expect("devnet seals quickly").header
+        };
+        let one = seal_height_1(1, 1_000);
+        let two = seal_height_1(2, 7_200_000);
+
+        assert_ne!(block_hash(&one), block_hash(&two), "the forks must really differ");
+        assert_ne!(one.timestamp_s(), two.timestamp_s());
+        assert_eq!(e.validate_header(&one, &genesis, &left), Ok(()), "fork one is valid");
+        assert_eq!(e.validate_header(&two, &genesis, &right), Ok(()), "fork two is valid");
+        left.push_header(one);
+        right.push_header(two);
+
+        // The counterfactual, spelled out: the *old* rule, applied to these two
+        // chains, gives two different answers. Without this the test could go
+        // green on an implementation that had quietly stopped moving at all.
+        let old_rule = |h1: &BlockHeader, parent_time_s: i64| {
+            asert_next_bits(
+                &AsertAnchor::from_compact(h1.bits, i64::try_from(h1.timestamp_s()).unwrap(), 1)
+                    .unwrap(),
+                parent_time_s,
+                2,
+                &e.asert_params(),
+            )
+            .unwrap()
+        };
+
+        // A child of each fork at the *same* height and the *same* timestamp:
+        // every input the difficulty rule is allowed to see is identical.
+        let parent_time_ms = genesis.timestamp_ms + 7_300_000;
+        let parent_time_s = i64::try_from(parent_time_ms / 1_000).unwrap();
+        assert_ne!(
+            old_rule(&one, parent_time_s),
+            old_rule(&two, parent_time_s),
+            "the old chain-read anchor really did split the network here"
+        );
+
+        let seal_height_2 = |view: &TestView, h1: &BlockHeader| -> BlockHeader {
+            let header = BlockHeader {
+                version: 1,
+                prev_hash: block_hash(h1),
+                merkle_root: Hash32::from_bytes([9; 32]),
+                timestamp_ms: parent_time_ms,
+                bits: e.next_bits(h1, view).unwrap(),
+                nonce: 0,
+            };
+            e.seal(template(header, 2), &cancel).unwrap().expect("devnet seals quickly").header
+        };
+        let parent_left = seal_height_2(&left, &one);
+        let parent_right = seal_height_2(&right, &two);
+        assert_ne!(block_hash(&parent_left), block_hash(&parent_right));
+        assert_eq!(parent_left.timestamp_ms, parent_right.timestamp_ms);
+        left.push_header(parent_left);
+        right.push_header(parent_right);
+
+        // This is the whole point. Same parent height, same parent timestamp,
+        // same parameters, two irreconcilable chains — one answer.
+        let from_left = e.next_bits(&parent_left, &left).unwrap();
+        let from_right = e.next_bits(&parent_right, &right).unwrap();
+        assert_eq!(
+            from_left, from_right,
+            "the difficulty rule must not depend on which fork the node is on"
+        );
+
+        // And that one answer is the one the parameters alone predict.
+        let expected = asert_next_bits(
+            &AsertAnchor::genesis(&params).unwrap(),
+            parent_time_s,
+            2,
+            &e.asert_params(),
+        )
+        .unwrap();
+        assert_eq!(from_left, expected);
+        assert!(
+            e.checked_target(from_left).unwrap() < e.pow_limit(),
+            "an answer pinned at pow_limit would make this test vacuous"
+        );
+    }
+
+    #[test]
+    fn next_bits_ignores_everything_in_the_view_except_the_parents_height() {
+        // Two views with nothing in common but the parent's height. The rule is
+        // a pure function of (parent_height, parent_time_s, params), so both
+        // must answer identically.
+        let e = devnet();
+        let params = e.params().clone();
+        let parent = BlockHeader {
+            version: 1,
+            prev_hash: BlockHash::from_bytes([7; 32]),
+            merkle_root: Hash32::from_bytes([8; 32]),
+            timestamp_ms: params.genesis_timestamp_ms + 360_000,
+            bits: CompactTarget(0x1d00_ffff),
+            nonce: 42,
+        };
+
+        let mut honest = TestView::devnet();
+        honest.push_genesis();
+        honest.push_child(120_000);
+        honest.push_header(parent);
+
+        let mut nonsense = TestView::devnet();
+        for i in 0u8..2 {
+            nonsense.push_header(BlockHeader {
+                version: 9,
+                prev_hash: BlockHash::from_bytes([i; 32]),
+                merkle_root: Hash32::from_bytes([i.wrapping_add(200); 32]),
+                timestamp_ms: 1,
+                bits: CompactTarget(0x1c00_ffff),
+                nonce: u64::from(i) + 1_000,
+            });
+        }
+        nonsense.push_header(parent);
+        nonsense.forget_height(0);
+        nonsense.forget_height(1);
+
+        assert_eq!(honest.height_of(&block_hash(&parent)), Some(2));
+        assert_eq!(nonsense.height_of(&block_hash(&parent)), Some(2));
+        assert_ne!(honest.header_at_height(1), nonsense.header_at_height(1));
+
+        let from_honest = e.next_bits(&parent, &honest).unwrap();
+        let from_nonsense = e.next_bits(&parent, &nonsense).unwrap();
+        assert_eq!(from_honest, from_nonsense, "the view must not be able to change the answer");
+        assert_eq!(
+            from_honest,
+            asert_next_bits(
+                &AsertAnchor::genesis(&params).unwrap(),
+                i64::try_from(parent.timestamp_s()).unwrap(),
+                2,
+                &e.asert_params(),
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -561,7 +821,11 @@ mod tests {
         match e.validate_header(&h, &genesis, &view) {
             Err(ConsensusError::InsufficientWork { hash, target }) => {
                 assert_eq!(hash, block_hash(&h));
-                assert_eq!(target, e.pow_limit());
+                assert_eq!(target, e.checked_target(h.bits).unwrap());
+                // With the anchor at genesis, height 1 is already on the ASERT
+                // schedule, so its target is one spacing *harder* than the
+                // limit rather than the limit itself.
+                assert!(target < e.pow_limit(), "height 1 is not exempt any more");
             }
             other => panic!("expected InsufficientWork, got {other:?}"),
         }

@@ -17,8 +17,15 @@ fn amount(v: u64) -> Amount {
 
 /// Devnet with a difficulty controller fast enough that a short branch can
 /// out-work a long one inside a test.
+///
+/// What makes a one-second block heavy is the ratio `spacing / half-life`, not
+/// either number alone. Half a spacing puts such a block 2.5 half-lives ahead
+/// of schedule and therefore ~5.7x harder than an on-schedule one, which is the
+/// margin these tests were written against. Pinning 60 s here instead would
+/// silently shrink that margin to 1% at devnet's 5 s spacing — still passing,
+/// but no longer testing anything.
 fn fast_difficulty() -> ChainParams {
-    devnet_with(|p| p.asert_halflife_s = 60)
+    devnet_with(|p| p.asert_halflife_s = i64::try_from(p.target_spacing_s()).unwrap() / 2)
 }
 
 #[test]
@@ -105,7 +112,8 @@ fn a_held_orphan_connects_once_its_parent_arrives() {
 fn a_lighter_branch_is_kept_as_a_side_chain() {
     let t = TestChain::new();
     let main = t.extend(3);
-    // Fork from height 1, so the ASERT anchor at height 1 is shared.
+    // Fork from height 1. Every branch shares the ASERT anchor whatever it
+    // forks from, because the anchor is genesis (CONTRACT §6.3).
     let fork = t.mine_on(&main[0], Vec::new(), 0, 77);
     let fork_hash = header_hash(&fork.header);
     assert_eq!(t.accept(fork).unwrap(), AcceptOutcome::SideChain(fork_hash));
@@ -396,7 +404,11 @@ fn an_immature_coinbase_cannot_be_spent() {
         Err(ChainError::Validation(ValidationError::ImmatureCoinbaseSpend {
             maturity, ..
         })) => {
-            assert_eq!(maturity, 100);
+            // Read the window off the parameters. Devnet's is 10 and mainnet's
+            // is 100; what this test is about is that the rule fires at all,
+            // and pinning the number here only makes it rot when devnet is
+            // retuned.
+            assert_eq!(maturity, t.params.coinbase_maturity);
         }
         other => panic!("expected an immaturity rejection, got {other:?}"),
     }

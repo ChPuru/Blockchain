@@ -271,15 +271,20 @@ fn balance_splits_confirmed_immature_and_pending() {
     let (mut wallet, _) = new_wallet(&dir);
     let a = wallet.new_address().unwrap();
     let maturity = wallet.params().coinbase_maturity;
+    // The coinbase is placed one block short of maturity at the tip, computed
+    // from the parameters: devnet's window is 10 and mainnet's is 100, and this
+    // test is about the three-way split, not about either number.
+    let tip = 400;
+    let immature_height = tip - maturity + 1;
     wallet.sync(
         vec![
             (op(1), coin_to(&a, 100, 1, false)),
-            (op(2), coin_to(&a, 200, 350, true)),
+            (op(2), coin_to(&a, 200, immature_height, true)),
             (op(3), coin_to(&a, 300, 500, false)),
         ],
-        400,
+        tip,
     );
-    let balance = wallet.balance(400, maturity);
+    let balance = wallet.balance(tip, maturity);
     assert_eq!(balance.confirmed, Amount::from_grains(100));
     assert_eq!(balance.immature, Amount::from_grains(200));
     assert_eq!(balance.pending, Amount::from_grains(300));
@@ -412,15 +417,18 @@ fn an_immature_coinbase_cannot_be_spent() {
     let dir = TempDir::new().unwrap();
     let (mut wallet, _) = new_wallet(&dir);
     let mine = wallet.new_address().unwrap();
-    wallet.sync(vec![(op(1), coin_to(&mine, 50 * 100_000_000, 1, true))], 50);
+    // One block short of maturity: a coinbase mined at height 1 is spendable at
+    // `1 + coinbase_maturity`, so at that height exactly it is not.
+    let maturity = wallet.params().coinbase_maturity;
+    let too_early = maturity;
+    wallet.sync(vec![(op(1), coin_to(&mine, 50 * 100_000_000, 1, true))], too_early);
     let req = SendRequest::to(mine, Amount::from_grains(100_000), 1_000);
     assert!(matches!(
-        wallet.plan_transaction(&req, 50),
+        wallet.plan_transaction(&req, too_early),
         Err(WalletError::InsufficientFunds { available: 0, .. })
     ));
 
     // ...and can once it matures.
-    let maturity = wallet.params().coinbase_maturity;
     wallet.sync(vec![(op(1), coin_to(&mine, 50 * 100_000_000, 1, true))], 1 + maturity);
     assert!(wallet.plan_transaction(&req, 1 + maturity).is_ok());
 }

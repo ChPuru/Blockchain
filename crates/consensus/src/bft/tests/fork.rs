@@ -431,15 +431,17 @@ fn a_block_validated_under_one_engine_stays_valid_across_the_fork() {
 
     let mut view = TestView::with_params(p.clone());
     let genesis = view.push_genesis();
+    let pow = PowEngine::new(p.clone());
     let candidate = BlockHeader {
         version: 1,
         prev_hash: block_hash(&genesis),
         merkle_root: Hash32::ZERO,
         timestamp_ms: genesis.timestamp_ms.saturating_add(120_000),
-        bits: p.genesis_bits,
+        // The ASERT anchor is genesis, so height 1 is on the schedule like
+        // every other block; its target is no longer simply `genesis_bits`.
+        bits: pow.next_bits(&genesis, &view).unwrap(),
         nonce: 0,
     };
-    let pow = PowEngine::new(p.clone());
     let block = pow
         .seal(BlockTemplate::new(candidate, Vec::new(), 1), &AtomicBool::new(false))
         .unwrap()

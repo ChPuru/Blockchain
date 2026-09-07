@@ -44,8 +44,10 @@ pub const MIN_BLOCK_VERSION: u32 = 1;
 ///
 /// Consensus needs heights, ancestors and median time past, but must not
 /// depend on `ferrum-storage`; this trait is the seam. Implementations are
-/// expected to be cheap — `next_bits` calls [`HeaderView::header_at_height`]
-/// once per header validated.
+/// expected to be cheap — the difficulty rule asks only for the parent's
+/// height, and reads its ASERT anchor out of [`ChainParams`] rather than out of
+/// the chain, so no engine calls [`HeaderView::header_at_height`] to decide
+/// whether a header is valid (CONTRACT 6.3).
 pub trait HeaderView: Send + Sync {
     /// The parameter set this chain is validating against.
     fn params(&self) -> &ChainParams;
@@ -125,10 +127,14 @@ pub trait ConsensusEngine: Send + Sync + core::fmt::Debug {
 
     /// The difficulty target for a child of `parent`.
     ///
+    /// A pure function of `(parent_height, parent_timestamp, params)`: it must
+    /// not depend on anything else the view holds, or two nodes on two forks
+    /// will reject each other's headers forever (CONTRACT 6.3).
+    ///
     /// # Errors
     ///
     /// [`ConsensusError::UnknownParent`] when the view does not know `parent`,
-    /// [`ConsensusError::MissingHeader`] when the ASERT anchor is absent.
+    /// and the target-expansion errors for a malformed parameter set.
     fn next_bits(
         &self,
         parent: &BlockHeader,

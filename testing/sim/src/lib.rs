@@ -80,6 +80,7 @@ pub mod view;
 
 pub use crate::chain_builder::{
     BlockPlan, ChainBuilder, DEFAULT_SEQUENCE, MINING_ATTEMPT_BUDGET, SpendableCoin, TxPlan,
+    sim_params,
 };
 pub use crate::error::SimError;
 pub use crate::keys::{DEFAULT_KEYRING_SIZE, KEYRING_DOMAIN, KeyRing, Lock};

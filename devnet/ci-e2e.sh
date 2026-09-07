@@ -50,12 +50,18 @@ else
 fi
 
 step "3. a transaction crosses the network"
-# Coinbase outputs are immature for 100 blocks, so wait them out before spending.
-# That maturity rule is consensus, not policy: spending a coinbase sooner would
-# lose the coins on any reorg deeper than the spend.
-MATURITY=100
+# Coinbase outputs are immature until they are `coinbase_maturity` blocks deep,
+# so wait them out before spending. That rule is consensus, not policy: spending
+# a coinbase sooner would lose the coins on any reorg deeper than the spend.
+#
+# This MUST match `ChainParams::devnet().coinbase_maturity`. Devnet uses 10
+# rather than mainnet's 100 precisely so that this step finishes: at devnet's
+# measured ~1 s network block time, 15 blocks is about 15 s of waiting instead
+# of the ~2 minutes 105 blocks would cost, and the rule is still exercised as a
+# rule.
+MATURITY="${FERRUM_DEVNET_MATURITY:-10}"
 echo "  mining past coinbase maturity ($MATURITY blocks)…"
-if wait_for_growth 1 "$((MATURITY + 5))" 900; then
+if wait_for_growth 1 "$((MATURITY + 5))" 300; then
     addr="$("$CHAINCLI" --rpc "http://127.0.0.1:$(rpc_port 2)" wallet address 2>/dev/null | tail -1)"
     if [ -n "$addr" ]; then
         txid="$("$CHAINCLI" --rpc "http://127.0.0.1:$(rpc_port 1)" wallet send \
@@ -75,7 +81,7 @@ if wait_for_growth 1 "$((MATURITY + 5))" 900; then
         bad "could not obtain an address from node 2"
     fi
 else
-    bad "chain did not reach coinbase maturity in 900s"
+    bad "chain did not reach coinbase maturity in 300s"
 fi
 
 step "4. crash recovery"
@@ -95,7 +101,10 @@ fi
 
 step "5. partition"
 bash "$DEVNET_DIR/partition.sh" >/dev/null
-sleep 45     # let both halves build visibly different branches
+# At devnet's ~1 s block time each half builds ~30 blocks in 30 s, which is a
+# divergence deep enough that healing it is a real reorg rather than a
+# one-block tie-break.
+sleep 30
 tip_a="$(node_tip 1)"; tip_b="$(node_tip "$NODES")"
 if [ -n "$tip_a" ] && [ -n "$tip_b" ] && [ "$tip_a" != "$tip_b" ]; then
     ok "network split: A at $(node_height 1), B at $(node_height "$NODES")"

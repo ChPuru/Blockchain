@@ -1,11 +1,13 @@
 //! Money crossing the network, and money surviving a reorganisation.
 //!
 //! Both tests spend a real coinbase with a real BIP-340 signature, which means
-//! both have to mine past `coinbase_maturity` first — a hundred and one blocks,
-//! on devnet exactly as on mainnet. That is the whole cost of these two tests,
-//! and it is not negotiable: a devnet that relaxed maturity would stop being
-//! evidence about the chain anyone runs, and the maturity rule is precisely the
-//! one a reorg exists to protect.
+//! both have to mine past `coinbase_maturity` first — eleven blocks on devnet,
+//! where the window is 10, against a hundred and one on mainnet. The *rule* is
+//! not negotiable and is not relaxed here: it is the same comparison in the
+//! same `apply_block`, exercised at both boundaries, and it is precisely the
+//! rule a reorg exists to protect. Only the constant is smaller, because
+//! devnet's blocks now cost real proof of work and a hundred-block warm-up
+//! would make these tests a hashing benchmark instead of a network test.
 //!
 //! # Why the second test is the interesting one
 //!

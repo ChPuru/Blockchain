@@ -38,4 +38,5 @@ echo
 echo "  bash devnet/status.sh   should show two distinct tips"
 echo "  bash devnet/heal.sh     reconnect; the branch with less cumulative work is reorged away"
 echo
-echo "$(c_dim 'Let it run for a minute or two so the two branches diverge visibly.')"
+echo "$(c_dim 'Give it twenty or thirty seconds: at the 5 s devnet spacing that is a')"
+echo "$(c_dim 'few dozen blocks per side, so healing it exercises a real reorg.')"
