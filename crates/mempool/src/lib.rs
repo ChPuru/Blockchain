@@ -51,6 +51,8 @@
 //! | `max_orphans` | 200 | orphans are memory nobody paid for |
 //! | `min_fee_rate` | `params.min_relay_fee_per_kb` | free relay bandwidth |
 //! | `expiry_blocks` | 336 | entries whose inputs the network has forgotten |
+//! | `max_ancestors` | 25 | a chain so deep that one block template costs a quadratic scan |
+//! | `max_ancestor_bytes` | 101 000 B | the same, measured in bytes |
 //! | [`MAX_STANDARD_TX_SIZE`] | 100 000 B | one transaction that is expensive for every relay |
 //!
 //! Eviction is lowest fee rate first, and it takes the victim's descendants
@@ -124,8 +126,9 @@ mod tests;
 pub use crate::error::MempoolError;
 pub use crate::orphan::{OrphanEntry, OrphanPool};
 pub use crate::policy::{
-    DEFAULT_EXPIRY_BLOCKS, DEFAULT_MAX_BYTES, DEFAULT_MAX_ORPHANS, FEE_RATE_DIVISOR,
-    MAX_STANDARD_TX_SIZE, MempoolConfig, check_standard, fee_rate, is_standard_script_pubkey,
+    DEFAULT_EXPIRY_BLOCKS, DEFAULT_MAX_ANCESTOR_BYTES, DEFAULT_MAX_ANCESTORS, DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_ORPHANS, FEE_RATE_DIVISOR, MAX_STANDARD_TX_SIZE, MempoolConfig, check_standard,
+    fee_rate, is_standard_script_pubkey,
 };
 pub use crate::pool::{AcceptResult, FeeKey, Mempool, MempoolEntry};
 pub use crate::select::is_final_by_height;

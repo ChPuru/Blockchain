@@ -79,12 +79,12 @@ pub mod sign;
 pub mod view;
 
 pub use crate::chain_builder::{
-    BlockPlan, ChainBuilder, DEFAULT_SEQUENCE, MINING_ATTEMPT_BUDGET, SpendableCoin, TxPlan,
-    sim_params,
+    BlockPlan, ChainBuilder, DEFAULT_SEQUENCE, MINING_ATTEMPT_BUDGET, SIM_BFT_VALIDATORS,
+    SpendableCoin, TxPlan, sim_bft_params, sim_params,
 };
 pub use crate::error::SimError;
 pub use crate::keys::{DEFAULT_KEYRING_SIZE, KEYRING_DOMAIN, KeyRing, Lock};
-pub use crate::mutate::{Mutation, invalid_variants};
+pub use crate::mutate::{Mutation, invalid_variants, rule_name};
 pub use crate::node::SimNode;
 pub use crate::prng::XorShift64;
 pub use crate::reference::{

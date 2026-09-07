@@ -29,7 +29,7 @@ use ferrum_types::{Amount, Coin, OutPoint, Txid};
 use crate::error::RpcError;
 use crate::handlers::convert;
 use crate::handlers::lookup::{
-    self, ADDRESS_HISTORY_LIMIT, ADDRESS_SCAN_CHUNK, ADDRESS_SCAN_LIMIT,
+    self, ADDRESS_HISTORY_LIMIT, ADDRESS_SCAN_CHUNK, ADDRESS_SCAN_LIMIT, BlockReader,
 };
 use crate::provider::{ChainProvider, MempoolProvider};
 use crate::types::rpc::{AddressBalance, UnspentJson};
@@ -102,6 +102,26 @@ pub fn address_report(
     mempool: &dyn MempoolProvider,
     address_str: &str,
 ) -> Result<AddressReport, RpcError> {
+    let mut reader = BlockReader::new(chain);
+    address_report_with(&mut reader, mempool, address_str)
+}
+
+/// [`address_report`] against a caller-supplied work budget.
+///
+/// The whole walk shares one [`BlockReader`], so an address with a quarter of a
+/// million history rows cannot turn one `GET` into a quarter of a million
+/// whole-block decodes. When the budget runs out the report says so:
+/// [`AddressReport::complete`] goes false and every balance in it is a lower
+/// bound, exactly as when [`ADDRESS_SCAN_LIMIT`] cuts the walk short.
+///
+/// # Errors
+/// As [`address_report`].
+pub fn address_report_with(
+    reader: &mut BlockReader<'_>,
+    mempool: &dyn MempoolProvider,
+    address_str: &str,
+) -> Result<AddressReport, RpcError> {
+    let chain = reader.chain();
     let params = chain.params();
     let address = convert::parse_address(address_str, params.network)?;
     let key = convert::address_index_key(&address);
@@ -157,7 +177,13 @@ pub fn address_report(
     let mut history: Vec<AddressHistoryEntry> = Vec::with_capacity(ordered.len());
 
     for (height, txid) in ordered {
-        let Some(found) = lookup::find_transaction(chain, &txid)? else {
+        let Some(found) = lookup::find_transaction(reader, &txid)? else {
+            if reader.truncated() {
+                // The request has spent its work budget. Everything after this
+                // row is unread, and `complete` below says so rather than the
+                // report implying a balance it never finished computing.
+                break;
+            }
             // The index named a transaction the store no longer holds. That
             // happens transiently during a reorg; skipping it beats failing
             // the whole page.
@@ -179,7 +205,7 @@ pub fn address_report(
         }
 
         let mut sent = Amount::ZERO;
-        for coin in lookup::resolve_prevouts(chain, &found.tx)?.into_iter().flatten() {
+        for coin in lookup::resolve_prevouts(reader, &found.tx)?.into_iter().flatten() {
             if !convert::script_pays_key(&coin.script_pubkey, &key) {
                 continue;
             }
@@ -254,7 +280,9 @@ pub fn address_report(
         utxos: utxos.into_iter().collect(),
         history,
         total_txs,
-        complete,
+        // A walk that ran out of *work* is as incomplete as one that ran out of
+        // rows, and the caller has to be told the same way.
+        complete: complete && !reader.truncated(),
     })
 }
 

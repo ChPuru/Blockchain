@@ -90,5 +90,5 @@ pub use crate::limits::{
 pub use crate::num::{ScriptNum, cast_to_bool, is_minimal_bool, is_minimally_encoded};
 pub use crate::opcode::{Instruction, Opcode};
 pub use crate::parse::{disassemble, is_push_only, parse};
-pub use crate::sighash::{SigHashType, sighash_preimage, signature_hash};
+pub use crate::sighash::{SigHashType, SighashCache, sighash_preimage, signature_hash};
 pub use crate::templates::ScriptType;

@@ -9,7 +9,13 @@
 //!   is reported as [`MessageAcceptance::Reject`] immediately, which is what
 //!   feeds gossipsub's P4 invalid-message score;
 //! - a static peer whose dial fails has its backoff doubled, while one that was
-//!   connected and then dropped is retried from the base delay.
+//!   connected and then dropped is retried from the base delay;
+//! - an inbound connection is refused when it would take this node over
+//!   `max_peers` *distinct* peers or over
+//!   [`limits::MAX_CONNECTIONS_PER_PEER`] connections from one identity. The
+//!   second half is the one that bounds an attacker: `self.peers.len()`
+//!   counts identities, so it never rises for a single keypair however often
+//!   it dials.
 
 use std::sync::Arc;
 
@@ -42,7 +48,8 @@ impl Worker {
                 let record = self.peers.entry(peer_id).or_default();
                 record.connections = record.connections.saturating_add(1);
                 record.address = Some(address.clone());
-                let first = record.connections == 1;
+                let connections = record.connections;
+                let first = connections == 1;
 
                 for peer in &mut self.static_peers {
                     if peer.dialing == Some(connection_id) || peer.peer_id == Some(peer_id) {
@@ -52,17 +59,27 @@ impl Worker {
                     }
                 }
 
-                if !first {
-                    return;
-                }
-                if self.peers.len() > self.max_peers && !self.is_static(&peer_id) {
+                // Both ceilings are evaluated here, before the `first`
+                // shortcut. Evaluating only on a peer's *first* connection is
+                // what let one identity hold an unbounded number of them:
+                // `self.peers.len()` counts identities, so it does not move
+                // when the same peer dials again.
+                let refusal = self.refuse_connection(&peer_id, connections, first);
+                if let Some(reason) = refusal {
                     tracing::warn!(
                         %peer_id,
                         peers = self.peers.len(),
-                        max = self.max_peers,
-                        "peer limit reached; closing the new connection"
+                        max_peers = self.max_peers,
+                        connections,
+                        max_per_peer = limits::MAX_CONNECTIONS_PER_PEER,
+                        reason,
+                        "refusing a connection"
                     );
                     swarm.close_connection(connection_id);
+                    return;
+                }
+
+                if !first {
                     return;
                 }
                 tracing::debug!(%peer_id, %address, "peer connected");
@@ -126,6 +143,31 @@ impl Worker {
 
             other => tracing::trace!(?other, "swarm event"),
         }
+    }
+
+    /// Why a newly established connection must be closed, if it must.
+    ///
+    /// A configured static peer is never refused: the operator asked for it,
+    /// and refusing it would make the node unable to reach the network it was
+    /// told to join.
+    fn refuse_connection(
+        &self,
+        peer_id: &PeerId,
+        connections: u32,
+        first: bool,
+    ) -> Option<&'static str> {
+        if self.is_static(peer_id) {
+            return None;
+        }
+        if connections > limits::MAX_CONNECTIONS_PER_PEER {
+            return Some("too many connections from one peer id");
+        }
+        // The peer ceiling counts identities, so it can only be crossed by a
+        // peer that is new to the map.
+        if first && self.peers.len() > self.max_peers {
+            return Some("peer limit reached");
+        }
+        None
     }
 
     /// Report a message as invalid and tell the node why.

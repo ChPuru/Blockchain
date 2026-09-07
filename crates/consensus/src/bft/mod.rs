@@ -14,7 +14,10 @@
 //! # The rules (CONTRACT 6.5, SPEC 9.2)
 //!
 //! - The validator set is fixed in `ChainParams::bft_validators`, x-only BIP-340
-//!   keys, `n >= 4`, `f = (n - 1) / 3`, quorum `2f + 1`.
+//!   keys, `n >= 4`, `f = (n - 1) / 3`, quorum `2f + 1`, and `2(2f + 1) > n`.
+//!   That last clause is quorum intersection, and it is the whole reason a
+//!   `2f+1` certificate means anything; it excludes exactly `n = 6`, which
+//!   [`ValidatorSet::new`](validators::ValidatorSet::new) refuses at startup.
 //! - Round: propose, prevote, precommit, commit, with round-robin proposer
 //!   `validators[(height + round) % n]`.
 //! - Timeouts double each round: `base * 2^round`.
@@ -26,7 +29,11 @@
 //!   [`BftMachine::step`](machine::BftMachine::step), and there are tests for
 //!   both halves of it.
 //! - Signed message:
-//!   `tagged_hash(TAG_BFT_PRECOMMIT, borsh(VoteMsg{chain_id, height, round, block_hash}))`.
+//!   `tagged_hash(TAG_BFT_PRECOMMIT, borsh(VoteMsg{chain_id, height, round, block_hash}))`,
+//!   and the prevote is the same preimage under `TAG_BFT_PREVOTE`. A proposal
+//!   signs `tagged_hash(TAG_BFT_PROPOSAL, borsh(VoteMsg) || borsh(pol_round))`:
+//!   `pol_round` picks which prevote rule a receiver runs, so leaving it out of
+//!   the preimage would hand that choice to whoever relays the message.
 //!
 //! # Safety over liveness, deliberately
 //!
@@ -56,7 +63,7 @@ pub mod vote;
 
 pub use crate::bft::engine::BftEngine;
 pub use crate::bft::event::{BftAction, BftEvent, BftMessage};
-pub use crate::bft::machine::BftMachine;
+pub use crate::bft::machine::{BftMachine, MAX_ROUND_LOOKAHEAD};
 pub use crate::bft::state::{
     RoundState, RoundVotes, Step, Timeout, TimeoutConfig, TimeoutKind, VoteOutcome, VoteTally,
     timeout_for_round,

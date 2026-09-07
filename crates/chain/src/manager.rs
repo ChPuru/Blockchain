@@ -402,7 +402,26 @@ impl ChainManager {
         if let Some(existing) = self.store.get_header(&hash)? {
             match existing.status {
                 BlockStatus::Invalid => return Err(ChainError::KnownInvalid(hash)),
-                BlockStatus::HaveData | BlockStatus::Valid => return Ok(AcceptOutcome::Duplicate),
+                // Connected at least once, so the body is in the store by
+                // construction (`connect_block` writes both in one
+                // transaction) and it is either the chain or a branch that
+                // already lost.
+                BlockStatus::Valid => return Ok(AcceptOutcome::Duplicate),
+                // Stored but never connected. There is nothing to re-validate,
+                // yet the block may still be owed the tip: a reorg on to it can
+                // have been deferred because a *sibling's* body had not arrived
+                // yet, and re-offering the branch tip is how that retry reaches
+                // us. Running fork choice again is cheap; refusing to is how a
+                // node stalls one block below the network.
+                BlockStatus::HaveData => {
+                    self.repair_missing_body(&existing, &block)?;
+                    let candidate = TipCandidate::new(
+                        hash,
+                        existing.height,
+                        Work::from_be_bytes(&existing.total_work),
+                    );
+                    return self.choose_tip(&block.header.prev_hash, candidate, true);
+                }
                 // A header we already validated, whose body has now arrived.
                 BlockStatus::HeaderOnly => {}
             }
@@ -433,33 +452,61 @@ impl ChainManager {
         // Persist header and body before deciding: a block we have validated
         // the header of is worth keeping even if it loses fork choice, because
         // the branch it is on may win later.
+        //
+        // **Body first, header second.** These are two separate `redb`
+        // transactions, each committed and fsynced on its own, so a crash
+        // between them is a state the store keeps forever. In this order it
+        // keeps an orphaned body — harmless, and overwritten the next time the
+        // block is offered. In the other order it keeps a `HaveData` status
+        // with no body behind it: sync computes "do I need this body?" from
+        // that byte and never asks again, gossip answers `Duplicate`, and the
+        // block can never be connected. A pointer is written after the data it
+        // names, which is the same invariant `Store::connect_block` is built
+        // around.
         let entry = BlockIndexEntry::from_block(
             &block,
             height,
             total_work.to_be_bytes(),
             BlockStatus::HaveData,
         )?;
-        self.store.store_header(&entry)?;
         self.store.store_block_body(&hash, &block)?;
+        self.store.store_header(&entry)?;
 
-        let incumbent = self.tip.read().candidate();
         let candidate = TipCandidate::new(hash, height, total_work);
+        self.choose_tip(&block.header.prev_hash, candidate, false)
+    }
+
+    /// Fork choice for a block whose header and body are already stored.
+    ///
+    /// `known` says whether the block was in the store before this call, which
+    /// is the only difference in what a caller is told when the block does not
+    /// win: a block offered twice is a `Duplicate`, a block offered once is on
+    /// a `SideChain`.
+    fn choose_tip(
+        &self,
+        prev_hash: &BlockHash,
+        candidate: TipCandidate,
+        known: bool,
+    ) -> Result<AcceptOutcome, ChainError> {
+        let hash = candidate.hash;
+        let incumbent = self.tip.read().candidate();
         if !is_better(&candidate, &incumbent) {
-            tracing::debug!(hash = %hash, height, "block accepted onto a side chain");
-            return Ok(AcceptOutcome::SideChain(hash));
+            tracing::debug!(hash = %hash, height = candidate.height, "block is not the best chain");
+            return Ok(if known {
+                AcceptOutcome::Duplicate
+            } else {
+                AcceptOutcome::SideChain(hash)
+            });
         }
 
-        if block.header.prev_hash == incumbent.hash {
-            match connect_tip_block(&self.store, &self.params, &self.engines, &hash) {
-                Ok(()) => {}
-                Err(e) => {
-                    self.mark_invalid(&hash);
-                    return Err(e);
-                }
+        if *prev_hash == incumbent.hash {
+            if let Err(e) = connect_tip_block(&self.store, &self.params, &self.engines, &hash) {
+                self.record_failure(&hash, &e);
+                return Err(e);
             }
             self.refresh_tip()?;
             let tip = *self.tip.read();
-            tracing::info!(hash = %hash, height, "new tip");
+            tracing::info!(hash = %hash, height = candidate.height, "new tip");
             self.emit(ChainEvent::NewTip {
                 hash: tip.hash,
                 height: tip.height,
@@ -469,6 +516,41 @@ impl ChainManager {
         }
 
         self.reorganise(incumbent.hash, hash)
+    }
+
+    /// Put the body back when the index claims one the store does not have.
+    ///
+    /// The only way to reach that state is a crash between the two writes in
+    /// [`ChainManager::accept_locked`] on a build that wrote them in the other
+    /// order. Nothing else repairs it — sync reads `HaveData` as "I already
+    /// have this" — so the block is re-validated and re-stored here rather than
+    /// left to a reindex. The body is sanity-checked first: a peer may offer
+    /// any bytes it likes under a header hash we already know.
+    fn repair_missing_body(
+        &self,
+        existing: &BlockIndexEntry,
+        block: &Block,
+    ) -> Result<(), ChainError> {
+        let hash = existing.block_hash();
+        if self.store.get_block(&hash)?.is_some() {
+            return Ok(());
+        }
+        tracing::warn!(
+            hash = %hash,
+            "the block index claims a body the store does not have; re-storing it"
+        );
+        check_block_sanity(block, &self.params)?;
+        self.store.store_block_body(&hash, block)?;
+        // Rewrite the entry too: one written without a body carries no
+        // `tx_count` or `size` either, and those are what the RPC reports.
+        let repaired = BlockIndexEntry::from_block(
+            block,
+            existing.height,
+            existing.total_work,
+            BlockStatus::HaveData,
+        )?;
+        self.store.store_header(&repaired)?;
+        Ok(())
     }
 
     /// Move the active chain from `from` to `to`.
@@ -488,7 +570,22 @@ impl ChainManager {
             }
         }
 
-        let outcome = execute_reorg(&self.store, &self.params, &self.engines, &plan)?;
+        let outcome = match execute_reorg(&self.store, &self.params, &self.engines, &plan) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // A reorg that failed part-way has rolled itself back, but the
+                // store's tip may still not be the one the cache names — and if
+                // it is not, every later block is judged against a chain that
+                // does not exist. Re-read before reporting the failure.
+                if let Err(refresh) = self.refresh_tip() {
+                    tracing::error!(
+                        error = %refresh,
+                        "could not refresh the tip cache after a failed reorg"
+                    );
+                }
+                return Err(e);
+            }
+        };
         self.refresh_tip()?;
         let tip = *self.tip.read();
         tracing::info!(
@@ -529,6 +626,34 @@ impl ChainManager {
         };
         *self.tip.write() = state;
         Ok(())
+    }
+
+    /// Deal with a failed connect: condemn the block only if the chain did.
+    ///
+    /// `BlockStatus::Invalid` is permanent, inherited by every descendant, and
+    /// the node bans peers that offer anything carrying it. Only a rule the
+    /// block itself broke may write it — a validation or consensus error, which
+    /// every node reproduces. A storage failure, a corrupt table or a tip that
+    /// moved under us says nothing about the block: recording those as a
+    /// verdict turns a full disk into a node that is stuck below the network
+    /// forever and bans everyone serving the honest chain.
+    ///
+    /// Either way the tip cache is re-read. A connect can fail *because* the
+    /// cache was stale (`NonContiguousConnect`), and leaving it stale means the
+    /// next block is judged against a tip the store does not have.
+    fn record_failure(&self, hash: &BlockHash, error: &ChainError) {
+        if crate::reorg::is_consensus_verdict(error) {
+            self.mark_invalid(hash);
+        } else {
+            tracing::error!(
+                hash = %hash,
+                error = %error,
+                "could not connect this block; leaving its status alone so it can be retried"
+            );
+        }
+        if let Err(e) = self.refresh_tip() {
+            tracing::error!(error = %e, "could not refresh the tip cache after a failed connect");
+        }
     }
 
     /// Record that a block is invalid, best effort.

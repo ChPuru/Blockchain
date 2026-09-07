@@ -450,6 +450,7 @@ impl Worker {
                         protocol_version: record.protocol_version.clone(),
                         last_rtt_ms: record.last_rtt_ms,
                         is_static: self.is_static(peer_id),
+                        connections: record.connections,
                     })
                     .collect();
                 drop(reply.send(peers));

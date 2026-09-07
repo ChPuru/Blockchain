@@ -13,12 +13,13 @@
 //! 4. size and standardness
 //! 5. finality against the *next* block
 //! 6. conflicts with what the pool already holds — no replace-by-fee
-//! 7. input resolution: the UTXO view first, then the pool's own outputs;
+//! 7. ancestor-package limits: chain depth and total ancestor bytes
+//! 8. input resolution: the UTXO view first, then the pool's own outputs;
 //!    anything still missing makes this an orphan
-//! 8. coinbase maturity
-//! 9. value: sums, fee, fee rate against the floor
-//! 10. script verification
-//! 11. insert, then evict down to `max_bytes` if the pool is now over
+//! 9. coinbase maturity
+//! 10. value: sums, fee, fee rate against the floor
+//! 11. script verification
+//! 12. insert, then evict down to `max_bytes` if the pool is now over
 //!
 //! None of it is consensus. A block containing a transaction rejected at any
 //! step above is valid, and this node will accept that block.
@@ -26,7 +27,7 @@
 use std::collections::BTreeSet;
 
 use ferrum_chain::{check_transaction_sanity, is_final};
-use ferrum_script::{ExecCtx, ScriptLimits, verify};
+use ferrum_script::{ExecCtx, ScriptLimits, SighashCache, verify};
 use ferrum_storage::{StateView, txid};
 use ferrum_types::{Amount, Coin, Transaction, Txid};
 
@@ -102,7 +103,12 @@ pub(crate) fn insert_one(
         }
     }
 
-    // 7. Resolve.
+    // 7. Chain depth. Cheap — it walks the pool's own maps and never the
+    //    store — and it must run *before* the resolution pass so that a
+    //    transaction extending an over-long chain costs nothing to refuse.
+    check_ancestor_limits(inner, cfg, &tx, size)?;
+
+    // 8. Resolve.
     let coins = match resolve_inputs(inner, &tx, view, next_height)? {
         Resolution::Coins(coins) => coins,
         Resolution::Missing(missing) => {
@@ -119,7 +125,7 @@ pub(crate) fn insert_one(
         }
     };
 
-    // 8, 9. Maturity, sums and the fee floor.
+    // 9, 10. Maturity, sums and the fee floor.
     let mut inputs_total = Amount::ZERO;
     for (input, coin) in tx.inputs.iter().zip(coins.iter()) {
         if coin.is_coinbase {
@@ -159,22 +165,32 @@ pub(crate) fn insert_one(
         return Err(MempoolError::FeeTooLow { fee_rate: rate, min: cfg.min_fee_rate });
     }
 
-    // 10. Scripts last: this is the only step that costs a signature check.
+    // 11. Scripts last: this is the only step that costs a signature check.
+    // One cache for the whole transaction, so verifying n inputs hashes the
+    // prevout/sequence/output lists once rather than n times.
+    let sighash_cache = SighashCache::new(&tx);
     for (input_index, (input, coin)) in tx.inputs.iter().zip(coins.iter()).enumerate() {
         let exec = ExecCtx {
             chain_id: cfg.params.chain_id,
             tx: &tx,
             input_index,
             input_value: coin.value,
+            // The coin's age, for the BIP-68 half of `OP_CHECKSEQUENCEVERIFY`.
+            // Mirrors `ferrum_chain::apply_block`: the height is known, the
+            // creating block's median time past is not reachable from this
+            // seam, so the 512-second flavour fails closed.
+            input_height: Some(coin.height),
+            input_mtp_s: None,
             block_height: next_height,
             block_mtp_s: mtp_s,
+            sighash_cache: Some(&sighash_cache),
             limits: ScriptLimits::CONSENSUS,
         };
         verify(&input.script_sig, &coin.script_pubkey, &exec)
             .map_err(|source| MempoolError::ScriptVerification { input_index, source })?;
     }
 
-    // 11. Admit, then make room.
+    // 12. Admit, then make room.
     let entry = MempoolEntry { tx, fee, size, fee_rate: rate, added_height: tip_height };
     inner.add(id, entry);
     let evicted = inner.evict_to_fit(cfg.max_bytes);
@@ -197,6 +213,60 @@ pub(crate) fn insert_one(
     }
 
     Ok(Admission::Added { txid: id, fee, fee_rate: rate, size, evicted })
+}
+
+/// Refuse a transaction whose unconfirmed ancestor package is too deep or too
+/// large.
+///
+/// # Why chain depth is a policy limit at all
+///
+/// [`crate::select::select_for_block`] must place a parent before its child,
+/// so it works in passes and the number of passes it needs is the depth of the
+/// deepest chain in the pool. Without a cap that depth is bounded only by
+/// `max_bytes`: a 30 000-deep chain of 200-byte transactions is six megabytes
+/// and a few hundredths of a coin in fees, and it makes every block template
+/// scan the pool 30 000 times while holding the pool lock. Bitcoin Core caps
+/// the same thing at 25 ancestors and 101 kvB, for the same reason.
+///
+/// The walk is over `inner.entries` only. A confirmed parent is not an
+/// ancestor — it is a UTXO — so the package is exactly the unconfirmed chain
+/// this transaction extends.
+fn check_ancestor_limits(
+    inner: &Inner,
+    cfg: &MempoolConfig,
+    tx: &Transaction,
+    size: usize,
+) -> Result<(), MempoolError> {
+    let mut seen: BTreeSet<Txid> = BTreeSet::new();
+    let mut queue: Vec<Txid> = tx.inputs.iter().map(|i| i.prev_out.txid).collect();
+    // The transaction counts towards its own package, exactly as Core's
+    // `-limitancestorcount` does.
+    let mut count: usize = 1;
+    let mut bytes: usize = size;
+
+    while let Some(id) = queue.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(parent) = inner.entries.get(&id) else {
+            // Confirmed, or not held here at all: not part of the package.
+            continue;
+        };
+        count = count.saturating_add(1);
+        bytes = bytes.saturating_add(parent.size);
+        if count > cfg.max_ancestors {
+            return Err(MempoolError::TooManyAncestors { count, max: cfg.max_ancestors });
+        }
+        if bytes > cfg.max_ancestor_bytes {
+            return Err(MempoolError::AncestorPackageTooLarge {
+                size: bytes,
+                max: cfg.max_ancestor_bytes,
+            });
+        }
+        queue.extend(parent.tx.inputs.iter().map(|i| i.prev_out.txid));
+    }
+
+    Ok(())
 }
 
 /// Resolve every input against the UTXO view, then against the pool's own
@@ -269,16 +339,22 @@ pub(crate) fn drain_promotions(
     let mut queue = roots;
 
     while let Some(parent) = queue.pop() {
-        for child in inner.orphans.take_children_of(&parent) {
-            match insert_one(inner, cfg, child, view, tip_height, mtp_s) {
+        for entry in inner.orphans.take_child_entries_of(&parent) {
+            let child_id = txid(&entry.tx);
+            match insert_one(inner, cfg, entry.tx, view, tip_height, mtp_s) {
                 Ok(Admission::Added { txid, evicted: e, .. }) => {
                     promoted.push(txid);
                     evicted.extend(e);
                     queue.push(txid);
                 }
                 // Still missing a *different* parent: back into the pool it
-                // goes, keyed on whatever it is now waiting for.
-                Ok(Admission::Orphaned { .. }) | Ok(Admission::AlreadyInPool { .. }) => {}
+                // goes, keyed on whatever it is now waiting for — and with the
+                // age it arrived with, so a round trip through promotion is
+                // not a free renewal of its expiry clock.
+                Ok(Admission::Orphaned { .. }) => {
+                    inner.orphans.restore_age(&child_id, entry.added_height, entry.seq);
+                }
+                Ok(Admission::AlreadyInPool { .. }) => {}
                 Err(e) => {
                     tracing::debug!(error = %e, "promoted orphan failed re-evaluation");
                 }

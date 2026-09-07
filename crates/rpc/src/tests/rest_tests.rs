@@ -432,3 +432,19 @@ async fn read_routes_carry_cors_headers_for_the_browser() {
         "the explorer is a public read-only API and browsers are the client"
     );
 }
+
+#[tokio::test]
+async fn the_query_permit_is_returned_after_every_request() {
+    // The explorer runs its storage work under a semaphore so it cannot occupy
+    // the blocking pool that block acceptance shares. A permit that leaked
+    // would let the first `MAX_CONCURRENT_QUERIES` requests through and hang
+    // the rest for ever, which is a worse outage than the one the limit
+    // prevents — so drive more requests through one router than there are
+    // permits.
+    let f = Fixture::build(1, false);
+    let a = app(f.context());
+    for i in 0..(crate::rest::MAX_CONCURRENT_QUERIES * 2 + 1) {
+        let (status, _) = get(&a, "/api/stats").await;
+        assert_eq!(status, StatusCode::OK, "request {i} did not get a permit back");
+    }
+}

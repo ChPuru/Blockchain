@@ -3,7 +3,7 @@
 
 use core::time::Duration;
 
-use ferrum_crypto::{Signature, TAG_BFT_PRECOMMIT, tagged_hash};
+use ferrum_crypto::{Signature, TAG_BFT_PRECOMMIT, TAG_BFT_PROPOSAL, tagged_hash};
 use ferrum_types::{BlockSeal, ChainId, ChainParams, ValidatorId};
 
 use super::*;
@@ -38,7 +38,7 @@ fn vote_encoding_is_forty_eight_frozen_bytes() {
 #[test]
 fn the_three_vote_digests_are_domain_separated() {
     let v = vote(4);
-    let p = proposal_digest(&v);
+    let p = proposal_digest(&v, None);
     let pre = prevote_digest(&v);
     let com = precommit_digest(&v);
     assert_ne!(p, pre);
@@ -54,7 +54,31 @@ fn the_chain_id_is_inside_every_digest() {
     let b = VoteMsg::new(ChainId(2), 5, 0, hash(1));
     assert_ne!(precommit_digest(&a), precommit_digest(&b), "cross-chain replay must be impossible");
     assert_ne!(prevote_digest(&a), prevote_digest(&b));
-    assert_ne!(proposal_digest(&a), proposal_digest(&b));
+    assert_ne!(proposal_digest(&a, None), proposal_digest(&b, None));
+    assert_ne!(proposal_digest(&a, Some(2)), proposal_digest(&b, Some(2)));
+}
+
+#[test]
+fn the_proposal_digest_commits_to_pol_round() {
+    // `pol_round` decides which of rules 2 and 3 a receiver runs, so it is a
+    // control input. Outside the signed preimage it would be a control input
+    // owned by whoever relays the message rather than by the proposer.
+    let v = VoteMsg::new(ChainId(3), 5, 7, hash(1));
+    assert_ne!(proposal_digest(&v, None), proposal_digest(&v, Some(0)));
+    assert_ne!(proposal_digest(&v, Some(0)), proposal_digest(&v, Some(1)));
+    assert_ne!(proposal_digest(&v, Some(6)), proposal_digest(&v, None));
+    assert_eq!(proposal_digest(&v, Some(6)), proposal_digest(&v, Some(6)), "and is a function");
+
+    // The preimage is the frozen 48-byte vote followed by borsh(Option<u32>),
+    // so the vote itself is unchanged and none of the three encodings is a
+    // prefix of another.
+    let mut none = v.signing_bytes();
+    none.push(0);
+    assert_eq!(proposal_digest(&v, None), tagged_hash(TAG_BFT_PROPOSAL, &none));
+    let mut some = v.signing_bytes();
+    some.push(1);
+    some.extend_from_slice(&6u32.to_le_bytes());
+    assert_eq!(proposal_digest(&v, Some(6)), tagged_hash(TAG_BFT_PROPOSAL, &some));
 }
 
 #[test]
@@ -119,9 +143,11 @@ fn a_proposal_signature_is_checked() {
 
 #[test]
 fn quorum_arithmetic_matches_the_contract() {
-    for (n, f, q) in
-        [(4usize, 1usize, 3usize), (5, 1, 3), (6, 1, 3), (7, 2, 5), (10, 3, 7), (64, 21, 43)]
-    {
+    // `f = (n - 1) / 3`, quorum `2f + 1`, unchanged (CONTRACT 6.5). n = 6 is
+    // absent because it is no longer an admissible set size, not because the
+    // formula differs there — `a_six_validator_set_is_refused` pins the f and
+    // quorum it would have produced, and why that is fatal.
+    for (n, f, q) in [(4usize, 1usize, 3usize), (5, 1, 3), (7, 2, 5), (10, 3, 7), (64, 21, 43)] {
         let e = engine(n);
         assert_eq!(e.validator_count(), n);
         assert_eq!(e.fault_tolerance(), f, "n = {n}");
@@ -133,17 +159,25 @@ fn quorum_arithmetic_matches_the_contract() {
 }
 
 #[test]
-fn quorum_intersection_holds_for_every_set_size_except_six() {
+fn quorum_intersection_holds_for_every_admissible_set_size() {
     // Two quorums must overlap, or two conflicting commits could both be
     // valid at one height. With f = (n-1)/3 that holds everywhere except
-    // n = 6, which is why the contract's `n = 3f + 1` shape matters.
+    // n = 6, which is why the contract's `n = 3f + 1` shape matters — and
+    // n = 6 is now refused by the constructor rather than merely noticed, so
+    // every set that exists has the property.
     for n in MIN_VALIDATORS..=32 {
-        let e = engine(n);
-        if n == 6 {
-            assert!(!e.has_quorum_intersection(), "n = 6 is the known degenerate case");
-            assert_eq!(e.quorum().saturating_mul(2), n);
-        } else {
-            assert!(e.has_quorum_intersection(), "n = {n} must have quorum intersection");
+        match ValidatorSet::new(validator_ids(n)) {
+            Ok(set) => {
+                assert_ne!(n, 6, "n = 6 must never be constructible");
+                assert!(set.has_quorum_intersection(), "n = {n} must have quorum intersection");
+                assert!(engine(n).has_quorum_intersection(), "n = {n} through the engine");
+            }
+            Err(ConsensusError::NoQuorumIntersection { validators, quorum }) => {
+                assert_eq!(n, 6, "n = 6 is the one degenerate size");
+                assert_eq!((validators, quorum), (6, 3));
+                assert_eq!(quorum.saturating_mul(2), n, "two quorums of 3 exactly fill the set");
+            }
+            Err(other) => panic!("n = {n} was refused for the wrong reason: {other:?}"),
         }
     }
     for n in [4usize, 7, 10, 13, 16] {
@@ -500,4 +534,32 @@ fn a_node_signing_with_a_key_outside_the_set_has_no_index() {
     let e = BftEngine::new(params(4), Some(outsider)).unwrap();
     assert_eq!(e.own_index(), None);
     assert!(!e.is_proposer(0, 0));
+}
+
+#[test]
+fn a_six_validator_set_is_refused() {
+    // n = 6 gives f = 1 and quorum 3, and 3 + 3 = 6 is not > 6: two disjoint
+    // quorums exist. One Byzantine proposer then splits the honest five into
+    // {0,1,2} and {3,4}, joins the second, and both groups reach 2f+1 on
+    // different blocks at one height. Both certificates pass `verify_commit`
+    // and therefore `validate_seal` — a hard fork from a single fault, which
+    // is exactly what the whole design promises cannot happen. It is a boot
+    // failure, not a log line.
+    assert_eq!(
+        ValidatorSet::new(validator_ids(6)).err(),
+        Some(ConsensusError::NoQuorumIntersection { validators: 6, quorum: 3 }),
+        "a validator set with two disjoint quorums must be refused"
+    );
+    let mut p = ChainParams::devnet();
+    p.bft_validators = validator_ids(6);
+    assert_eq!(
+        BftEngine::new(p, None).err(),
+        Some(ConsensusError::NoQuorumIntersection { validators: 6, quorum: 3 }),
+        "and the engine must refuse to start on it"
+    );
+    // Every other size in the neighbourhood is fine, so the rejection is the
+    // degenerate case and not a blanket ban on non-`3f+1` sets.
+    for n in [4usize, 5, 7, 8, 9] {
+        assert!(ValidatorSet::new(validator_ids(n)).is_ok(), "n = {n} must still be accepted");
+    }
 }

@@ -22,6 +22,25 @@
 //! than the pass before its child, so the dependency rule holds by
 //! construction, and within a pass the order is exactly descending fee rate.
 //!
+//! # A deferral must not cost a storage read
+//!
+//! Deciding to defer is free: a candidate one of whose inputs names another
+//! candidate still in the running cannot possibly be included this pass, and
+//! that is answerable from `waiting` alone. Resolving its inputs first would
+//! be a database read transaction per input for a foregone conclusion, and
+//! the ordering makes that the common case rather than the rare one:
+//! candidates arrive in descending fee-rate order, so a chain whose children
+//! pay more than their parents arrives in exactly reverse dependency order and
+//! each pass makes one transaction of progress. A 30 000-deep chain — six
+//! megabytes, a few hundredths of a coin in fees — would otherwise cost around
+//! 4.5 x 10^8 `get_coin` calls for a single template, with the pool's lock
+//! held throughout. Checking `waiting` first makes the expensive resolution
+//! run at most once per candidate, whatever the depth.
+//!
+//! Depth itself is bounded at admission by `MempoolConfig::max_ancestors`,
+//! which caps the number of passes; the two limits together are what make one
+//! template's cost linear in the pool size.
+//!
 //! # What is re-checked here and what is not
 //!
 //! Re-checked: that each input still resolves, coinbase maturity at *this*
@@ -110,7 +129,12 @@ pub fn select_for_block(
     let mut waiting: BTreeSet<Txid> = pending.iter().map(|(id, _)| *id).collect();
 
     while !pending.is_empty() {
-        let mut progress = false;
+        // Whether this pass settled anything at all. Not "included
+        // something": a pass that only *rejects* still shrinks `waiting`, and
+        // a candidate deferred because of one of those rejected transactions
+        // deserves the pass that its removal unblocks. `waiting` is finite and
+        // only ever shrinks, so the loop still terminates.
+        let mut decided = false;
         let mut deferred: Vec<(Txid, &MempoolEntry)> = Vec::with_capacity(pending.len());
 
         for (id, entry) in std::mem::take(&mut pending) {
@@ -118,6 +142,17 @@ pub fn select_for_block(
             // oversized candidate lets a smaller one behind it in.
             if used.saturating_add(entry.size) > max_bytes {
                 waiting.remove(&id);
+                decided = true;
+                continue;
+            }
+            // Then the free half of the resolution: a candidate naming
+            // another candidate that is still in the running cannot be
+            // included yet, and answering that from `waiting` costs nothing.
+            // `try_include` would reach the same verdict at the cost of one
+            // database read transaction per input, on every pass — which is
+            // what made a deep chain quadratic in storage reads.
+            if entry.tx.inputs.iter().any(|i| waiting.contains(&i.prev_out.txid)) {
+                deferred.push((id, entry));
                 continue;
             }
             match try_include(&mut overlay, entry, height, params, &waiting) {
@@ -125,16 +160,21 @@ pub fn select_for_block(
                     used = used.saturating_add(entry.size);
                     chosen.push(entry.tx.clone());
                     waiting.remove(&id);
-                    progress = true;
+                    decided = true;
                 }
+                // Unreachable: no input names anything still waiting, and
+                // that is the only condition `try_include` defers on. Kept as
+                // a deferral rather than an assertion so that a future
+                // resolution rule cannot silently drop a candidate.
                 Inclusion::Deferred => deferred.push((id, entry)),
                 Inclusion::Rejected => {
                     waiting.remove(&id);
+                    decided = true;
                 }
             }
         }
 
-        if !progress {
+        if !decided {
             // Everything left is waiting on something that will never come.
             break;
         }

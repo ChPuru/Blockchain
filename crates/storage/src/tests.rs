@@ -9,6 +9,7 @@
 mod crash;
 mod extra;
 mod fixtures;
+mod index_state;
 mod index_tests;
 mod ordering;
 mod reorg;

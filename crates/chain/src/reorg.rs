@@ -191,6 +191,17 @@ pub fn connect_tip_block(
 
 /// Carry out `plan`, restoring the original tip if any connect fails.
 ///
+/// # Missing bodies are not a verdict
+///
+/// [`plan_reorg`] walks headers, so it happily plans a reorg onto a branch
+/// whose bodies are still downloading. That is *not* a reason to condemn the
+/// branch, so the bodies are checked up front and a gap aborts the reorg with
+/// [`ChainError::MissingBlockBody`] before anything is written and without
+/// recording a status. The same distinction governs the connect loop: only a
+/// consensus verdict — [`ChainError::Validation`] or [`ChainError::Consensus`]
+/// — marks the branch `Invalid`. A storage failure says nothing about the
+/// block, and `Invalid` is permanent and inherited.
+///
 /// # Errors
 ///
 /// The failing block's own error, after the store has been put back. If the
@@ -203,9 +214,39 @@ pub fn execute_reorg(
     engines: &EngineRouter,
     plan: &ReorgPlan,
 ) -> Result<ReorgOutcome, ChainError> {
+    // Before touching the store: every block we are about to connect must have
+    // a body. Finding this out half-way through would cost a rollback, and
+    // — worse — used to be indistinguishable from "this branch is invalid".
+    for hash in &plan.connect {
+        let entry = entry_of(store, hash)?;
+        if !entry.status.has_data() {
+            tracing::debug!(
+                hash = %hash,
+                height = entry.height,
+                "reorg deferred: the body for this block has not arrived yet"
+            );
+            return Err(ChainError::MissingBlockBody(*hash));
+        }
+    }
+
     let mut undone: Vec<BlockHash> = Vec::with_capacity(plan.disconnect.len());
     for expected in &plan.disconnect {
-        let got = store.disconnect_tip()?;
+        let got = match store.disconnect_tip() {
+            Ok(got) => got,
+            Err(e) => {
+                // Each disconnect is its own committed transaction, so the
+                // blocks already off the chain stay off unless we put them
+                // back. Restore before reporting, exactly as the branch below
+                // does for a tip that moved.
+                tracing::warn!(
+                    error = %e,
+                    disconnected = undone.len(),
+                    "reorg disconnect failed; rolling back to the original tip"
+                );
+                roll_back(store, params, engines, &[], &undone)?;
+                return Err(ChainError::Storage(e));
+            }
+        };
         undone.push(got);
         if got != *expected {
             // The tip moved under us. Put back what came off and refuse.
@@ -232,7 +273,9 @@ pub fn execute_reorg(
                     "reorg connect failed; rolling back to the original tip"
                 );
                 roll_back(store, params, engines, &connected, &undone)?;
-                mark_branch_invalid(store, &plan.connect, hash);
+                if is_consensus_verdict(&e) {
+                    mark_branch_invalid(store, &plan.connect, hash);
+                }
                 return Err(e);
             }
         }
@@ -270,6 +313,22 @@ fn roll_back(
     }
     tracing::info!(restored = undone.len(), "rolled back to the original tip");
     Ok(())
+}
+
+/// Whether `error` is the chain's verdict on the *block*, rather than a report
+/// about this node.
+///
+/// `BlockStatus::Invalid` is permanent and inherited, and every path that reads
+/// it — [`crate::ChainManager::accept_block`], `accept_header`, and the node's
+/// gossip verdict, which bans the peer that offered it — treats it as proof the
+/// block breaks a rule. Only a rule can produce that: a validation or consensus
+/// error is reproducible on every node, whereas a full disk, a corrupt table or
+/// a tip that moved is a fact about this machine at this moment. Recording the
+/// second as the first turns one bad night into a permanently stuck node that
+/// bans everyone serving the honest chain.
+#[must_use]
+pub fn is_consensus_verdict(error: &ChainError) -> bool {
+    matches!(error, ChainError::Validation(_) | ChainError::Consensus(_))
 }
 
 /// Mark the failing block and everything after it on its branch `Invalid`.

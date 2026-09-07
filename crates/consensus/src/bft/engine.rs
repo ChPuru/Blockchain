@@ -49,19 +49,16 @@ impl BftEngine {
     ///
     /// # Errors
     ///
-    /// Every [`ValidatorSet::new`] error.
+    /// Every [`ValidatorSet::new`] error, including
+    /// [`ConsensusError::NoQuorumIntersection`] for a set that could fork.
     pub fn new(
         params: ChainParams,
         signing_key: Option<SecretKey>,
     ) -> Result<Self, ConsensusError> {
+        // `ValidatorSet::new` is the whole gate: size, duplicates, key
+        // validity and quorum intersection. A set that admits two disjoint
+        // quorums is refused there, so this engine cannot exist over one.
         let validators = ValidatorSet::new(params.bft_validators.clone())?;
-        if !validators.has_quorum_intersection() {
-            tracing::warn!(
-                validators = validators.len(),
-                quorum = validators.quorum(),
-                "validator set admits two disjoint quorums; use n = 3f + 1 (4, 7, 10, 13, …)"
-            );
-        }
         let machine = BftMachine::new(
             params.chain_id,
             validators.clone(),
@@ -178,15 +175,32 @@ impl BftEngine {
         self.state.lock().last_commit.clone()
     }
 
-    /// Record a verified commit, which is what makes its height final.
+    /// Record a commit, which is what makes its height final.
     ///
-    /// The driver calls this after the block it certifies has been stored.
-    /// Finality only ever moves forward: a stale commit cannot lower it.
-    pub fn record_commit(&self, commit: BftCommit) {
+    /// The certificate is verified **here**, against this engine's own
+    /// validator set, rather than on the promise of a caller. `finalized` only
+    /// ever moves forward and no API lowers it, so a certificate accepted on
+    /// trust is irreversible for the life of the process: one claiming
+    /// `u64::MAX` would make
+    /// [`EngineRouter::check_reorg`](crate::EngineRouter::check_reorg) refuse
+    /// every reorg at every depth, and the node could never rejoin the honest
+    /// chain. [`ConsensusEngine::seal`] runs the same check before touching the
+    /// same two fields; the cost is `2f+1` Schnorr verifications.
+    ///
+    /// The driver calls this after the block it certifies has been stored. A
+    /// stale but valid commit is harmless: finality only ever moves forward.
+    ///
+    /// # Errors
+    ///
+    /// Every [`Self::verify_commit`] error. On any of them nothing is
+    /// recorded.
+    pub fn record_commit(&self, commit: BftCommit) -> Result<(), ConsensusError> {
+        self.verify_commit(&commit, &commit.block_hash, commit.height)?;
         let mut state = self.state.lock();
         let height = commit.height;
         state.finalized = Some(state.finalized.map_or(height, |current| current.max(height)));
         state.last_commit = Some(commit);
+        Ok(())
     }
 
     // ------------------------------------------------------------ signatures
@@ -294,8 +308,29 @@ impl BftEngine {
     fn finalized_from_view(&self, view: &dyn HeaderView) -> Option<u64> {
         let activation = self.params.bft_activation_height?;
         let (tip_hash, tip_height) = view.tip();
-        // An empty view reports a zero tip; require the header to exist.
-        view.header_by_hash(&tip_hash)?;
+        // An empty view reports a zero tip, and only an empty view can: no
+        // real block hashes to zero. That is the test, and it is deliberately
+        // *not* "can I read the tip header".
+        //
+        // `HeaderView` has nowhere to report a storage error, so every
+        // implementation turns one into `None` (see `crates/chain/src/view.rs`,
+        // whose module doc says failing closed is the only safe direction).
+        // For the difficulty rule that is right: "unknown" means "reject". For
+        // finality the polarity is inverted — a missing answer here would
+        // silently delete the guard that stops a committed prefix being
+        // unwound. So a tip hash that names a real block finalises its height
+        // whether or not the header table happens to answer.
+        //
+        // What this cannot see is a `tip()` that *itself* degraded to
+        // `(ZERO, 0)` on a storage error — from here that is identical to an
+        // empty chain, and the caller has already picked an engine off that
+        // same zero height. Closing that needs a `HeaderView` that can say
+        // "unknown" as distinct from "empty"; until then the recorded
+        // `finalized` from `record_commit`/`seal`, which no view can lower, is
+        // the floor a running validator keeps.
+        if tip_hash.is_zero() {
+            return None;
+        }
         (tip_height >= activation).then_some(tip_height)
     }
 }

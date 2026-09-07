@@ -265,14 +265,27 @@ impl Wallet {
 
     /// Derive the next unused change address and persist the index.
     pub fn new_change_address(&mut self) -> Result<Address, WalletError> {
+        let meta = self.keystore.meta();
+        let key = self.keychain.derive(meta.account, CHANGE_CHAIN, meta.next_change_index)?;
+        self.retire_change_index()?;
+        Ok(*key.address())
+    }
+
+    /// Move `next_change_index` past the index a build has just paid to.
+    ///
+    /// [`Wallet::change_addresses`] reports `0..next_change_index`, so an
+    /// index that has been paid but not retired is a change output no caller
+    /// ever asks the node about. Persisting the increment *before* the
+    /// transaction is broadcast is the same ordering [`Wallet::new_address`]
+    /// uses, and for the same reason: a crash may skip an index, never reuse
+    /// one.
+    fn retire_change_index(&mut self) -> Result<(), WalletError> {
         let mut meta = self.keystore.meta();
         let index = meta.next_change_index;
-        let key = self.keychain.derive(meta.account, CHANGE_CHAIN, index)?;
         meta.next_change_index =
             index.checked_add(1).ok_or(WalletError::AddressIndexOutOfRange(index))?;
         self.keystore.set_meta(meta)?;
-        self.rebuild_script_index()?;
-        Ok(*key.address())
+        self.rebuild_script_index()
     }
 
     /// Every receive address this wallet has issued, in index order.
@@ -286,6 +299,13 @@ impl Wallet {
     }
 
     /// Every change address this wallet has issued, in index order.
+    ///
+    /// Callers build their "which scripts do I ask the node about" list out of
+    /// this plus [`Wallet::addresses`] (`chain-cli`'s `sync_from_node`, the
+    /// RPC faucet's `WalletFaucetSource::scripts`), so an index this wallet
+    /// has paid change to and *not* reported here is money it can never see
+    /// again. [`Wallet::send`] retires the index it spends to for exactly that
+    /// reason.
     pub fn change_addresses(&self) -> Vec<Address> {
         let meta = self.keystore.meta();
         (0..meta.next_change_index)
@@ -448,11 +468,30 @@ impl Wallet {
     /// The reservation is what stops a second `send` before the first confirms
     /// from selecting the same coins and producing a double spend that the
     /// mempool drops silently.
+    ///
+    /// # Change
+    ///
+    /// When the plan pays change to this wallet's own change chain, the index
+    /// it used is retired here, before
+    /// the caller can broadcast. That does two things:
+    ///
+    /// * the coin lands on an address [`Wallet::change_addresses`] reports, so
+    ///   the next sync actually asks the node about it, and
+    /// * the next `send` builds against a fresh index instead of paying every
+    ///   transaction's change to one address and linking the whole history.
     pub fn send(&mut self, req: &SendRequest, tip_height: u64) -> Result<TxPlan, WalletError> {
         let mut plan = self.plan_transaction(req, tip_height)?;
         let prevouts = plan.prevouts();
         let chain_id = self.chain_id();
         self.sign_transaction(&mut plan.tx, &prevouts, chain_id)?;
+        if plan.change.is_some() {
+            let ours = self.current_change_address()?;
+            // `change_to: None` means "the wallet's own change chain", and a
+            // caller naming that same address explicitly means the same thing.
+            if req.change_to.unwrap_or(ours) == ours {
+                self.retire_change_index()?;
+            }
+        }
         self.coins.reserve(&plan.out_points());
         Ok(plan)
     }

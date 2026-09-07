@@ -33,7 +33,7 @@
 //! **Green:** the most expensive block the rules *do* allow is accepted, and
 //! its measured cost obeys the published bound.
 
-use ferrum_script::{ExecCtx, ExecStats, MAX_OPS, ScriptLimits, verify};
+use ferrum_script::{ExecCtx, ExecStats, MAX_OPS, verify};
 use ferrum_storage::StateView;
 use ferrum_types::{Amount, Block, Script, Transaction, TxIn, TxOut};
 
@@ -94,13 +94,11 @@ pub fn measure(block: &Block, pre: &dyn StateView, ctx: &BlockCtx) -> Result<Blo
                 .get_coin(&input.prev_out)?
                 .ok_or_else(|| SimError::fixture("input does not resolve"))?;
             let exec = ExecCtx {
-                chain_id: ctx.params.chain_id,
-                tx,
-                input_index: index,
                 input_value: coin.value,
+                input_height: Some(coin.height),
                 block_height: ctx.height,
                 block_mtp_s: ctx.median_time_past_s,
-                limits: ScriptLimits::CONSENSUS,
+                ..ExecCtx::new(ctx.params.chain_id, tx, index)
             };
             let stats: ExecStats = verify(&input.script_sig, &coin.script_pubkey, &exec)?;
             cost.ops = cost.ops.saturating_add(stats.ops);

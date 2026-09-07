@@ -243,3 +243,66 @@ fn between_two_equal_fees_the_smaller_transaction_is_chosen_first() {
     let picked = pool.select_for_block(1_000_000, &view, 11);
     assert_eq!(picked.iter().map(id).collect::<Vec<_>>(), vec![id(&lean), id(&fat)]);
 }
+
+#[test]
+fn a_deep_chain_costs_a_bounded_number_of_storage_reads() {
+    use crate::tests::support::{CountingView, ascending_fee_chain};
+
+    // 40 chained transactions, each paying a higher rate than its parent, so
+    // the fee index offers the selector the deepest descendant first. A
+    // selector that re-resolves every deferred candidate on every pass does
+    // O(depth^2) reads; one that knows which candidates cannot yet be
+    // included does O(depth).
+    const DEPTH: usize = 40;
+    let op = unknown_out(1, 0);
+    let view = CountingView::new(view_with(&[(op, coin(1_000_000, 1, false))]));
+    let pool = Mempool::new(cfg().with_max_ancestors(DEPTH + 1));
+    let chain = ascending_fee_chain(op, 1_000_000, DEPTH);
+    for t in &chain {
+        pool.accept(t.clone(), &view, 10, 0).expect("accepted");
+    }
+    assert_eq!(pool.len(), DEPTH);
+    // The adversarial ordering the finding describes: the fee index really
+    // does hand them back child-first.
+    let by_fee: Vec<ferrum_types::Txid> =
+        pool.entries_by_fee().into_iter().map(|(k, _)| k).collect();
+    assert_eq!(by_fee[0], id(&chain[DEPTH - 1]), "the deepest child must lead");
+
+    view.reset();
+    let picked = pool.select_for_block(1_000_000, &view, 11);
+    let reads = view.reads();
+    assert_eq!(picked.len(), DEPTH, "every transaction in the chain is minable");
+    assert_eq!(picked.iter().map(id).collect::<Vec<_>>(), chain.iter().map(id).collect::<Vec<_>>());
+    assert!(
+        reads <= DEPTH * 4,
+        "selecting a {DEPTH}-deep chain did {reads} storage reads; \
+         a bounded selector does at most {}",
+        DEPTH * 4
+    );
+}
+
+#[test]
+fn a_child_is_still_chosen_when_its_pool_parent_turns_out_to_be_confirmed() {
+    // `remove_confirmed` runs after a block connects, so for a moment the pool
+    // holds a transaction whose outputs are already real UTXOs. A selector
+    // that decided "this parent is still a candidate, so defer the child" and
+    // then gave up because the pass included nothing would drop a perfectly
+    // minable child.
+    let (view, ops) = funds(1, 100_000);
+    let pool = Mempool::new(cfg());
+    let parent = tx(&[ops[0]], &[99_000]);
+    let child = tx(&[out(&parent, 0)], &[90_000]);
+    pool.accept(parent.clone(), &view, 10, 0).expect("accepted");
+    pool.accept(child.clone(), &view, 10, 0).expect("accepted");
+    // The child pays the higher rate, so it is offered to the selector first.
+    assert!(
+        pool.get(&id(&child)).expect("held").fee_rate
+            > pool.get(&id(&parent)).expect("held").fee_rate
+    );
+
+    // The parent was mined: its input has left the UTXO set and its output
+    // has entered it.
+    let confirmed = view_with(&[(out(&parent, 0), coin(99_000, 11, false))]);
+    let picked = pool.select_for_block(1_000_000, &confirmed, 12);
+    assert_eq!(picked.iter().map(id).collect::<Vec<_>>(), vec![id(&child)]);
+}

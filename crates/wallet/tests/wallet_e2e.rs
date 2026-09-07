@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use ferrum_crypto::{Address, Mnemonic};
-use ferrum_types::{Amount, COIN, ChainId, Coin, Network, OutPoint, Transaction, Txid};
+use ferrum_types::{Amount, COIN, ChainId, Coin, Network, OutPoint, Script, Transaction, Txid};
 use ferrum_wallet::{
     KeystoreFile, KeystoreParams, MIN_PBKDF2_ITERATIONS, SendRequest, Wallet, WalletError,
 };
@@ -340,4 +340,73 @@ fn two_wallets_from_one_mnemonic_agree_on_every_address() {
     for _ in 0..5 {
         assert_eq!(first.new_address().unwrap(), second.new_address().unwrap());
     }
+}
+
+// --------------------------------------------------------------------- change
+
+/// Exactly the query `chain-cli`'s `sync_from_node` and the RPC faucet's
+/// `WalletFaucetSource::scripts` make: every address the wallet says it has
+/// issued, receive and change, and nothing else.
+///
+/// A coin paid to a script outside that list is a coin the wallet is never
+/// handed, and therefore one it can never spend — however well `Wallet::sync`
+/// would have recognised it had anyone asked the node for it.
+fn rows_a_node_would_return(wallet: &Wallet, utxos: &[(OutPoint, Coin)]) -> Vec<(OutPoint, Coin)> {
+    let watched: Vec<Script> = wallet
+        .addresses()
+        .iter()
+        .chain(wallet.change_addresses().iter())
+        .map(Address::script_pubkey)
+        .collect();
+    utxos.iter().filter(|(_, coin)| watched.contains(&coin.script_pubkey)).cloned().collect()
+}
+
+#[test]
+fn change_comes_back_spendable_after_a_send_and_a_resync() {
+    let dir = TempDir::new().unwrap();
+    let (mut wallet, _, _) = new_wallet(&dir, "change.json", "pw");
+    let funded = wallet.new_address().unwrap();
+    let tip = 1_000;
+
+    let chain_utxos = vec![mined(&funded, 1)];
+    let rows = rows_a_node_would_return(&wallet, &chain_utxos);
+    wallet.sync(rows, tip);
+    assert_eq!(wallet.balance_at(tip).confirmed, Amount::from_grains(50 * COIN));
+
+    let stranger = ferrum_crypto::SecretKey::from_bytes(&[0x42u8; 32]).unwrap();
+    let payee = Address::p2pkh(Network::Devnet, &stranger.public_key());
+    let first =
+        wallet.send(&SendRequest::to(payee, Amount::from_grains(10 * COIN), 1_000), tip).unwrap();
+    assert!(first.change.is_some(), "a 10 FRM payment out of 50 FRM must produce change");
+
+    // Change is the last output (`crates/wallet/src/build.rs`, "Output order").
+    let change_script = first.tx.outputs.last().unwrap().script_pubkey.clone();
+    assert!(
+        wallet.change_addresses().iter().any(|a| a.script_pubkey() == change_script),
+        "the wallet paid change to a script it does not report as one of its own",
+    );
+
+    // The block confirms, and the wallet re-syncs the only way a caller can:
+    // by asking the node about the addresses the wallet reports.
+    let height = tip + 1;
+    let chain_utxos = confirm(&chain_utxos, &first.tx, height);
+    let rows = rows_a_node_would_return(&wallet, &chain_utxos);
+    wallet.sync(rows, height);
+
+    let expected = Amount::from_grains(50 * COIN - 10 * COIN - first.fee.to_grains());
+    assert_eq!(
+        wallet.balance_at(height).confirmed,
+        expected,
+        "the change is invisible after a restart-shaped resync",
+    );
+
+    // Visible is not enough: it has to be spendable again.
+    let second =
+        wallet.send(&SendRequest::to(payee, Amount::from_grains(COIN), 1_000), height).unwrap();
+    assert!(second.change.is_some());
+    assert_ne!(
+        second.tx.outputs.last().unwrap().script_pubkey,
+        change_script,
+        "the second send reused the first send's change address",
+    );
 }

@@ -56,6 +56,12 @@ pub const WORDLIST_LEN: usize = 2048;
 /// Bits of entropy contributed by one word.
 const BITS_PER_WORD: usize = 11;
 
+/// Bytes to reserve per word when building a phrase: the longest word in the
+/// English wordlist is 8 bytes, plus the single space that follows it.
+///
+/// Reserving is not an optimisation here — see [`Mnemonic::from_entropy`].
+const MAX_WORD_BYTES: usize = 9;
+
 /// PBKDF2 iteration count fixed by BIP-39.
 pub const PBKDF2_ROUNDS: u32 = 2048;
 
@@ -145,7 +151,14 @@ impl Mnemonic {
         buf.extend_from_slice(entropy);
         buf.push(sha256(entropy)[0]);
 
-        let mut phrase = String::new();
+        // Sized once, up front, and never grown. A `String` that reallocates
+        // copies the phrase into a new buffer and frees the old one *without
+        // scrubbing it* — `Zeroizing` can only clear the buffer that is live
+        // when it drops, so a growing phrase leaves a plaintext prefix of
+        // itself in freed heap for a core dump or a heap-reuse read to find.
+        // The longest word in the English wordlist is 8 bytes, plus one
+        // separator each, which a test pins.
+        let mut phrase = Zeroizing::new(String::with_capacity(word_count * MAX_WORD_BYTES));
         for i in 0..word_count {
             let index = read_bits(&buf, i * BITS_PER_WORD, BITS_PER_WORD);
             if i > 0 {
@@ -155,7 +168,7 @@ impl Mnemonic {
                 ENGLISH.get(index).copied().expect("an 11-bit index is always below 2048"),
             );
         }
-        Ok(Mnemonic(Zeroizing::new(phrase)))
+        Ok(Mnemonic(phrase))
     }
 
     /// Parse and validate a phrase.
@@ -488,6 +501,31 @@ mod tests {
     fn from_str_is_from_phrase() {
         let m = Mnemonic::from_entropy(&[0u8; 16]).unwrap();
         assert_eq!(m.phrase().parse::<Mnemonic>().unwrap(), m);
+    }
+
+    #[test]
+    fn the_longest_word_fits_the_reserved_size() {
+        let longest = english_wordlist().iter().map(|w| w.len()).max().unwrap_or(0);
+        assert!(longest < MAX_WORD_BYTES, "a {longest}-byte word plus a space needs more room");
+    }
+
+    #[test]
+    fn from_entropy_builds_the_phrase_without_reallocating() {
+        // A reallocation leaves an unzeroized prefix of the phrase in freed
+        // heap, which is nine of the twelve words of a fresh wallet. The
+        // observable proof that none happened is that the buffer still has
+        // exactly the capacity that was reserved before the first word: a
+        // grown `String` would be at a power of two above it.
+        for words in VALID_WORD_COUNTS {
+            let entropy = vec![0x5au8; entropy_len_for(words).unwrap()];
+            let mnemonic = Mnemonic::from_entropy(&entropy).unwrap();
+            assert_eq!(
+                mnemonic.0.capacity(),
+                words * MAX_WORD_BYTES,
+                "the {words}-word phrase buffer was reallocated while being built",
+            );
+            assert!(mnemonic.0.len() <= mnemonic.0.capacity());
+        }
     }
 
     #[test]

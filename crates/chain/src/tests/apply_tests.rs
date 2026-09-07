@@ -404,3 +404,100 @@ fn an_empty_pre_state_reads_as_missing_everywhere() {
     assert_eq!(TxIn::coinbase(Script::new(vec![0, 0])).prev_out, OutPoint::NULL);
     assert_eq!(TxOut::new(amount(1), any_spend_script()).value, amount(1));
 }
+
+// ------------------------------------- SPEC §3.2: the order of header rules
+//
+// SPEC §3.2 fixes the order as rule 7 (`bits`), rule 8 (proof of work), rule 9
+// (`timestamp_ms > MTP * 1000`), and says plainly that an implementation
+// checking them in a different order can accept a block another node rejects.
+// CONTRACT §8.1 rule 5 lists the same order, `PowEngine::validate_header`
+// follows it, and so does the reference executor. Every test below breaks
+// *two* header rules at once, which is the only way the order is observable.
+
+#[test]
+fn proof_of_work_is_checked_before_the_median_time_past() {
+    let params = devnet();
+    let (parent, prev, _) = scene(&params);
+    let ctx = ctx_at(1, &parent, MTP_S, &params);
+    let mut block = block_with(vec![coinbase(1, amount(1), b"n")], prev, &params);
+    // Both broken: the timestamp sits exactly on the median, and the nonce
+    // does not meet the target.
+    block.header.timestamp_ms = MTP_S * 1_000;
+    let block = break_pow(reseal(block), &params);
+    assert!(
+        matches!(
+            apply_block(&EmptyView, &block, &ctx),
+            Err(ValidationError::Header(ConsensusError::InsufficientWork { .. }))
+        ),
+        "SPEC §3.2 puts proof of work (rule 8) before the timestamp bound (rule 9)"
+    );
+}
+
+#[test]
+fn the_pow_limit_bound_is_checked_before_the_median_time_past() {
+    let params = devnet();
+    let (parent, prev, _) = scene(&params);
+    let ctx = ctx_at(1, &parent, MTP_S, &params);
+    let mut block =
+        block_of(vec![coinbase(1, amount(1), b"n")], prev, BLOCK_MS, CompactTarget(0x2100_ffff));
+    block.header.timestamp_ms = MTP_S * 1_000;
+    assert!(
+        matches!(
+            apply_block(&EmptyView, &block, &ctx),
+            Err(ValidationError::Header(ConsensusError::TargetAbovePowLimit { .. }))
+        ),
+        "the target rules are read before the timestamp bound"
+    );
+}
+
+#[test]
+fn a_target_above_the_pow_limit_is_rejected_under_the_bft_engine_too() {
+    // `bits` is a hashed header field every node must agree on, so it is
+    // range-checked at every height under every engine; only the hash
+    // comparison is proof-of-work's own. The reference executor does exactly
+    // this, and a BFT height that skipped the check would accept a header the
+    // reference rejects.
+    let params = devnet();
+    let (parent, prev, _) = scene(&params);
+    let ctx = ctx_at(1, &parent, MTP_S, &params).with_engine(BlockSeal::ENGINE_BFT);
+    let mut block =
+        block_of(vec![coinbase(1, amount(1), b"n")], prev, BLOCK_MS, CompactTarget(0x2100_ffff));
+    block.seal = BlockSeal { engine: BlockSeal::ENGINE_BFT, data: vec![1] };
+    assert!(
+        matches!(
+            apply_block(&EmptyView, &block, &ctx),
+            Err(ValidationError::Header(ConsensusError::TargetAbovePowLimit { .. }))
+        ),
+        "the pow_limit bound is not proof-of-work's private business"
+    );
+}
+
+#[test]
+fn a_zero_target_is_rejected_under_the_bft_engine_too() {
+    let params = devnet();
+    let (parent, prev, _) = scene(&params);
+    let ctx = ctx_at(1, &parent, MTP_S, &params).with_engine(BlockSeal::ENGINE_BFT);
+    // Built at the network's own target and then re-stamped: a zero target
+    // cannot be mined against, which is the point of rejecting it.
+    let mut block = block_with(vec![coinbase(1, amount(1), b"n")], prev, &params);
+    block.header.bits = CompactTarget(0);
+    block.seal = BlockSeal { engine: BlockSeal::ENGINE_BFT, data: vec![1] };
+    assert_eq!(
+        apply_block(&EmptyView, &block, &ctx),
+        Err(ValidationError::Header(ConsensusError::ZeroTarget)),
+        "a zero target divides the work calculation and must never be accepted"
+    );
+}
+
+#[test]
+fn a_well_formed_header_still_passes_under_the_bft_engine() {
+    // The control for the two tests above: moving the target checks out of the
+    // proof-of-work branch must not start rejecting honest BFT headers, whose
+    // `bits` are inherited from the last proof-of-work block.
+    let params = devnet();
+    let (parent, prev, _) = scene(&params);
+    let ctx = ctx_at(1, &parent, MTP_S, &params).with_engine(BlockSeal::ENGINE_BFT);
+    let mut block = block_with(vec![coinbase(1, amount(1), b"n")], prev, &params);
+    block.seal = BlockSeal { engine: BlockSeal::ENGINE_BFT, data: vec![1] };
+    assert!(apply_block(&EmptyView, &block, &ctx).is_ok());
+}

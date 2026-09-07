@@ -202,7 +202,7 @@ pub fn push_bytes(out: &mut Vec<u8>, data: &[u8]) -> Result<(), SimError> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use ferrum_script::{ExecCtx, ScriptLimits, verify};
+    use ferrum_script::{ExecCtx, verify};
     use ferrum_types::{OutPoint, TxIn, TxOut, Txid};
 
     use super::*;
@@ -224,13 +224,10 @@ mod tests {
             unlock(&tx, 0, lock, value, ChainId::DEVNET, keys, SigHashType::ALL).unwrap();
         tx.inputs[0].script_sig = script_sig;
         let ctx = ExecCtx {
-            chain_id: ChainId::DEVNET,
-            tx: &tx,
-            input_index: 0,
             input_value: value,
             block_height: 10,
             block_mtp_s: 1_000,
-            limits: ScriptLimits::CONSENSUS,
+            ..ExecCtx::new(ChainId::DEVNET, &tx, 0)
         };
         verify(&tx.inputs[0].script_sig, &script_pubkey, &ctx).is_ok()
     }

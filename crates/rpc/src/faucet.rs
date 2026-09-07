@@ -17,6 +17,14 @@
 //! if the payment fails. Someone who asks while the wallet is empty has not
 //! used their turn.
 //!
+//! "Fails" has to include *delivery*, not just construction. A payment the
+//! mempool refuses — a conflicting spend, a fee below the floor — was never
+//! made, and a caller that dispensed first and submitted afterwards would burn
+//! the quota on it with nothing to show. So [`Faucet::dispense`] takes the
+//! delivery step as a closure and runs it inside the rolled-back region: the
+//! invariant in this heading is structural rather than something each caller
+//! has to remember.
+//!
 //! # An empty wallet is an answer, not a panic
 //!
 //! Every failure here becomes an [`crate::error::RpcErrorCode`] and an HTTP
@@ -245,17 +253,33 @@ impl Faucet {
         self.limiter.lock().tracked()
     }
 
-    /// Check the limits, build the payment, and spend the quota only if it
-    /// worked.
+    /// Check the limits, build the payment, hand it to `deliver`, and spend the
+    /// quota only if all three worked.
     ///
     /// `client` is whatever the transport can attest to about the caller — a
     /// peer IP, or a proxy-supplied one. It is opaque here.
     ///
+    /// `deliver` is the step that actually sends the payment — in the node,
+    /// offering it to the mempool. It is a parameter rather than the caller's
+    /// next line because a payment the mempool refuses was not made, and the
+    /// quota for it has to be given back; see the module docs. Its value comes
+    /// back alongside the transaction, so a caller that needs the id the pool
+    /// assigned does not have to compute it a second way.
+    ///
     /// # Errors
     /// [`RpcErrorCode::FaucetRateLimited`] when either window is exhausted,
     /// [`RpcErrorCode::FaucetDrained`] when the wallet cannot fund the
-    /// payment, [`RpcErrorCode::FaucetFailed`] otherwise.
-    pub fn dispense(&self, to: &Address, client: &str) -> Result<Transaction, RpcError> {
+    /// payment, [`RpcErrorCode::FaucetFailed`] otherwise, and whatever
+    /// `deliver` returns.
+    pub fn dispense<T, F>(
+        &self,
+        to: &Address,
+        client: &str,
+        deliver: F,
+    ) -> Result<(Transaction, T), RpcError>
+    where
+        F: FnOnce(&Transaction) -> Result<T, RpcError>,
+    {
         let now = self.clock.now_ms();
         let address_key = format!("addr:{}", to.encode());
         let ip_key = format!("ip:{client}");
@@ -283,15 +307,22 @@ impl Faucet {
             }
         }
 
-        match self.source.build_payment(to, self.config.amount) {
-            Ok(tx) => Ok(tx),
-            Err(e) => {
-                let mut limiter = self.limiter.lock();
-                limiter.rollback(&address_key, now);
-                limiter.rollback(&ip_key, now);
-                Err(e)
-            }
+        let tx = match self.source.build_payment(to, self.config.amount) {
+            Ok(tx) => tx,
+            Err(e) => return Err(self.refund(&address_key, &ip_key, now, e)),
+        };
+        match deliver(&tx) {
+            Ok(value) => Ok((tx, value)),
+            Err(e) => Err(self.refund(&address_key, &ip_key, now, e)),
         }
+    }
+
+    /// Give both windows their hit back and return the failure unchanged.
+    fn refund(&self, address_key: &str, ip_key: &str, now: u64, e: RpcError) -> RpcError {
+        let mut limiter = self.limiter.lock();
+        limiter.rollback(address_key, now);
+        limiter.rollback(ip_key, now);
+        e
     }
 }
 
@@ -432,6 +463,16 @@ mod tests {
         Address::p2pkh(Network::Devnet, &public)
     }
 
+    /// A delivery step that always succeeds.
+    fn sent(_tx: &Transaction) -> Result<(), RpcError> {
+        Ok(())
+    }
+
+    /// A delivery step that always fails, as a full mempool would.
+    fn refused(_tx: &Transaction) -> Result<(), RpcError> {
+        Err(RpcError::new(RpcErrorCode::TxRejected, "the mempool refused this payment"))
+    }
+
     fn faucet(source: Arc<dyn FaucetSource>, clock: Arc<ManualClock>) -> Faucet {
         Faucet::with_clock(
             FaucetConfig::default().with_ip_limit(60_000, 3).with_address_window_ms(600_000),
@@ -444,7 +485,7 @@ mod tests {
     fn a_first_request_is_served() {
         let clock = Arc::new(ManualClock::default());
         let f = faucet(Arc::new(CountingSource::default()), Arc::clone(&clock));
-        assert!(f.dispense(&address(1), "10.0.0.1").is_ok());
+        assert!(f.dispense(&address(1), "10.0.0.1", sent).is_ok());
     }
 
     #[test]
@@ -452,8 +493,8 @@ mod tests {
         let clock = Arc::new(ManualClock::default());
         let f = faucet(Arc::new(CountingSource::default()), Arc::clone(&clock));
         let a = address(2);
-        assert!(f.dispense(&a, "10.0.0.1").is_ok());
-        let err = f.dispense(&a, "10.0.0.2").unwrap_err();
+        assert!(f.dispense(&a, "10.0.0.1", sent).is_ok());
+        let err = f.dispense(&a, "10.0.0.2", sent).unwrap_err();
         assert_eq!(err.code(), RpcErrorCode::FaucetRateLimited);
         assert!(err.detail().contains("address"));
     }
@@ -463,9 +504,9 @@ mod tests {
         let clock = Arc::new(ManualClock::default());
         let f = faucet(Arc::new(CountingSource::default()), Arc::clone(&clock));
         let a = address(3);
-        assert!(f.dispense(&a, "10.0.0.1").is_ok());
+        assert!(f.dispense(&a, "10.0.0.1", sent).is_ok());
         clock.advance(600_001);
-        assert!(f.dispense(&a, "10.0.0.1").is_ok(), "the window should have expired");
+        assert!(f.dispense(&a, "10.0.0.1", sent).is_ok(), "the window should have expired");
     }
 
     #[test]
@@ -473,9 +514,9 @@ mod tests {
         let clock = Arc::new(ManualClock::default());
         let f = faucet(Arc::new(CountingSource::default()), Arc::clone(&clock));
         for i in 0..3u8 {
-            assert!(f.dispense(&address(10 + i), "10.0.0.9").is_ok(), "grant {i}");
+            assert!(f.dispense(&address(10 + i), "10.0.0.9", sent).is_ok(), "grant {i}");
         }
-        let err = f.dispense(&address(20), "10.0.0.9").unwrap_err();
+        let err = f.dispense(&address(20), "10.0.0.9", sent).unwrap_err();
         assert_eq!(err.code(), RpcErrorCode::FaucetRateLimited);
         assert!(err.detail().contains("client"));
     }
@@ -485,9 +526,9 @@ mod tests {
         let clock = Arc::new(ManualClock::default());
         let f = faucet(Arc::new(CountingSource::default()), Arc::clone(&clock));
         for i in 0..3u8 {
-            assert!(f.dispense(&address(30 + i), "10.0.0.9").is_ok());
+            assert!(f.dispense(&address(30 + i), "10.0.0.9", sent).is_ok());
         }
-        assert!(f.dispense(&address(40), "10.0.0.10").is_ok());
+        assert!(f.dispense(&address(40), "10.0.0.10", sent).is_ok());
     }
 
     #[test]
@@ -495,10 +536,10 @@ mod tests {
         let clock = Arc::new(ManualClock::default());
         let f = faucet(Arc::new(EmptySource), Arc::clone(&clock));
         let a = address(4);
-        let err = f.dispense(&a, "10.0.0.1").unwrap_err();
+        let err = f.dispense(&a, "10.0.0.1", sent).unwrap_err();
         assert_eq!(err.code(), RpcErrorCode::FaucetDrained);
         // The failed attempt must not have consumed the address's turn.
-        let again = f.dispense(&a, "10.0.0.1").unwrap_err();
+        let again = f.dispense(&a, "10.0.0.1", sent).unwrap_err();
         assert_eq!(again.code(), RpcErrorCode::FaucetDrained, "quota was spent on a failure");
         assert_eq!(f.tracked_keys(), 0, "a rolled-back key leaves nothing behind");
     }
@@ -508,9 +549,9 @@ mod tests {
         let clock = Arc::new(ManualClock::default());
         let f = faucet(Arc::new(CountingSource::default()), Arc::clone(&clock));
         let a = address(5);
-        assert!(f.dispense(&a, "10.0.0.1").is_ok());
+        assert!(f.dispense(&a, "10.0.0.1", sent).is_ok());
         clock.advance(100_000);
-        let err = f.dispense(&a, "10.0.0.1").unwrap_err();
+        let err = f.dispense(&a, "10.0.0.1", sent).unwrap_err();
         // 600_000 ms window, 100_000 elapsed, so 500 seconds remain.
         assert!(err.detail().contains("500s"), "{}", err.detail());
     }
@@ -528,7 +569,7 @@ mod tests {
         );
         for i in 0..50u8 {
             clock.advance(1);
-            assert!(f.dispense(&address(i.saturating_add(1)), "10.0.0.1").is_ok());
+            assert!(f.dispense(&address(i.saturating_add(1)), "10.0.0.1", sent).is_ok());
         }
         assert!(f.tracked_keys() <= 4, "tracked {} keys", f.tracked_keys());
     }
@@ -536,6 +577,18 @@ mod tests {
     #[test]
     fn the_default_grant_is_one_frm() {
         assert_eq!(FaucetConfig::default().amount, Amount::from_grains(100_000_000));
+    }
+
+    #[test]
+    fn a_payment_the_mempool_refuses_does_not_spend_the_quota() {
+        let clock = Arc::new(ManualClock::default());
+        let f = faucet(Arc::new(CountingSource::default()), Arc::clone(&clock));
+        let a = address(6);
+        let err = f.dispense(&a, "10.0.0.1", refused).unwrap_err();
+        assert_eq!(err.code(), RpcErrorCode::TxRejected);
+        assert_eq!(f.tracked_keys(), 0, "a refused delivery left a hit behind");
+        // The address's turn is still there to be used.
+        assert!(f.dispense(&a, "10.0.0.1", sent).is_ok(), "quota was spent on a failed delivery");
     }
 
     #[test]

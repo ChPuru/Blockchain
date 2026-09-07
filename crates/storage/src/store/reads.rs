@@ -12,7 +12,7 @@ use redb::ReadableTableMetadata;
 use crate::error::StorageError;
 use crate::index::TxLocation;
 use crate::state_root::StateRootBuilder;
-use crate::store::{Store, UtxoBytes, decode_opt, get_bytes};
+use crate::store::{Store, UtxoBytes, decode_opt, get_bytes, read_index_height};
 use crate::tables::{
     self, ADDR_INDEX, BLOCKS, BlockIndexEntry, HEADERS, HEIGHT, META, META_CHAIN_ID, META_ENGINE,
     META_SCHEMA_VERSION, META_TIP, OUTPOINT_KEY_LEN, SCHEMA_VERSION, TX_INDEX, UNDO, UTXO,
@@ -170,12 +170,53 @@ impl Store {
     ///
     /// # Errors
     /// [`StorageError::IndexDisabled`] when the store was opened without the
-    /// index; [`StorageError::Corrupt`] if the stored location does not decode.
+    /// index; [`StorageError::IndexIncomplete`] when the index does not
+    /// describe the current tip; [`StorageError::Corrupt`] if the stored
+    /// location does not decode.
     pub fn tx_location(&self, id: &Txid) -> Result<Option<TxLocation>, StorageError> {
         self.require_index()?;
         let txn = self.db.begin_read()?;
+        Store::require_current_index(&txn)?;
         let t = txn.open_table(TX_INDEX)?;
         decode_opt("tx location", t.get(&txid_key(id))?.map(|g| g.value().to_vec()))
+    }
+
+    /// The height the reverse index is complete to, or `None` when it
+    /// describes no block at all.
+    ///
+    /// This is `meta.index_height` (CONTRACT S7). It equals the tip height on
+    /// a store whose index is current; anything else means the tables were
+    /// written by a run with a different `--index` setting and a `chain
+    /// reindex` is owed. Readable whether or not this handle maintains the
+    /// index, because the question "is the index usable" is exactly the one an
+    /// operator asks after changing the flag.
+    ///
+    /// # Errors
+    /// [`StorageError::BadLength`] if the stored value is not eight bytes.
+    pub fn index_height(&self) -> Result<Option<u64>, StorageError> {
+        let txn = self.db.begin_read()?;
+        let t = txn.open_table(META)?;
+        read_index_height(&t)
+    }
+
+    /// Fail unless the reverse index describes the active tip.
+    ///
+    /// Read inside the caller's own snapshot, so the answer cannot be
+    /// overtaken by a connect between the check and the read it guards.
+    fn require_current_index(txn: &redb::ReadTransaction) -> Result<(), StorageError> {
+        let meta = txn.open_table(META)?;
+        let tip_height = match get_bytes(&meta, META_TIP)? {
+            Some(raw) => Some(decode_tip(&raw)?.1),
+            None => None,
+        };
+        let indexed_to = read_index_height(&meta)?;
+        match tip_height {
+            // Nothing has been connected, so there is nothing to index and
+            // every query has the same empty answer either way.
+            None => Ok(()),
+            Some(height) if indexed_to == Some(height) => Ok(()),
+            Some(height) => Err(StorageError::IndexIncomplete { indexed_to, tip_height: height }),
+        }
     }
 
     /// Transactions touching `key`, from `from_height` upwards, at most `limit`.
@@ -193,7 +234,9 @@ impl Store {
     /// height is the cursor an explorer's "older" link already has.
     ///
     /// # Errors
-    /// [`StorageError::IndexDisabled`] when the store has no index.
+    /// [`StorageError::IndexDisabled`] when the store has no index, and
+    /// [`StorageError::IndexIncomplete`] when the index it has does not
+    /// describe the current tip.
     pub fn address_history(
         &self,
         key: &[u8],
@@ -222,7 +265,9 @@ impl Store {
     /// [`Store::address_history`] is the contract's paging view built on it.
     ///
     /// # Errors
-    /// [`StorageError::IndexDisabled`] when the store has no index.
+    /// [`StorageError::IndexDisabled`] when the store has no index, and
+    /// [`StorageError::IndexIncomplete`] when the index it has does not
+    /// describe the current tip.
     pub fn address_history_after(
         &self,
         key: &[u8],
@@ -230,12 +275,13 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<(u64, u32, Txid)>, StorageError> {
         self.require_index()?;
+        let txn = self.db.begin_read()?;
+        Store::require_current_index(&txn)?;
         let mut out = Vec::new();
         if limit == 0 {
             return Ok(out);
         }
         let (from_height, from_idx) = after.unwrap_or((0, 0));
-        let txn = self.db.begin_read()?;
         let t = txn.open_table(ADDR_INDEX)?;
         let start = addr_index_key(key, from_height, from_idx);
         let end = addr_index_key(key, u64::MAX, u32::MAX);

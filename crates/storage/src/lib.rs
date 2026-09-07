@@ -30,9 +30,16 @@
 //! 3. **Undo records are written from the first commit.** They cannot be
 //!    retrofitted: the records for historical blocks do not exist, so adding
 //!    them later forces a reindex on every deployed node. See [`undo`].
-//! 4. **The reverse index is not consensus state.** It is built only when
-//!    [`StoreConfig::index_transactions`] is on, and a node without it is
-//!    fully valid.
+//! 4. **The reverse index is not consensus state, and it says how far it is
+//!    built.** It is maintained only when [`StoreConfig::index_transactions`]
+//!    is on, and a node without it is fully valid. Because that is a *runtime*
+//!    flag, the same datadir can be written by a run that maintained it and by
+//!    a run that did not, so `meta.index_height` records the height the tables
+//!    actually describe: a connect advances it, a disconnect lowers it, and a
+//!    write made with the flag off removes it. A read against an index whose
+//!    height is not the tip's fails with [`StorageError::IndexIncomplete`]
+//!    instead of answering from rows that describe a chain that no longer
+//!    exists. See [`Store::index_height`].
 //!
 //! # Layout
 //!

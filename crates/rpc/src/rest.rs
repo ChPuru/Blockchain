@@ -16,11 +16,18 @@
 //! 0.7. EIP-3091 writes the shape as `/api/block/:height_or_hash`; the route
 //! that implements it is spelled `{height_or_hash}`.
 //!
-//! # Two layers that are not optional
+//! # Three limits that are not optional
 //!
 //! [`MAX_REQUEST_BODY`] caps every request body. Without it, `Json<T>`
 //! buffers whatever a client sends before it can be rejected, and a single
 //! unauthenticated POST can exhaust the node's memory.
+//!
+//! [`MAX_CONCURRENT_QUERIES`] caps how many of these requests may be inside
+//! [`blocking`] at once. Every read here runs on `tokio`'s blocking pool — the
+//! same pool `Relay::accept_block` and the sync manager use — so an explorer
+//! with no concurrency limit is a way to stop a node validating blocks by
+//! asking it for web pages. Requests over the limit wait for a permit, which
+//! costs a task and not a thread.
 //!
 //! CORS is permissive on the read paths because the explorer is a public,
 //! read-only API and browsers are the intended clients. It is scoped to the
@@ -47,6 +54,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
+use tokio::sync::Semaphore;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 
@@ -64,6 +72,13 @@ use crate::types::explorer::{
 /// hundred bytes. The cap is three orders of magnitude above that and still far
 /// below anything that could hurt.
 pub const MAX_REQUEST_BODY: usize = 64 * 1024;
+
+/// How many REST requests may be doing storage work at the same time.
+///
+/// `tokio`'s blocking pool defaults to 512 threads and is shared with block
+/// acceptance; sixteen is enough to keep the explorer responsive and small
+/// enough that it can never be what starves consensus. See the module docs.
+pub const MAX_CONCURRENT_QUERIES: usize = 16;
 
 /// The header a trusted reverse proxy sets.
 pub const FORWARDED_FOR: &str = "x-forwarded-for";
@@ -95,6 +110,8 @@ pub struct RestState {
     ctx: NodeContext,
     config: Arc<RestConfig>,
     index_html: Arc<String>,
+    /// Permits for [`MAX_CONCURRENT_QUERIES`] concurrent storage queries.
+    permits: Arc<Semaphore>,
 }
 
 impl RestState {
@@ -119,7 +136,12 @@ impl RestState {
             },
             None => EMBEDDED_EXPLORER.to_owned(),
         };
-        RestState { ctx, config: Arc::new(config), index_html: Arc::new(index_html) }
+        RestState {
+            ctx,
+            config: Arc::new(config),
+            index_html: Arc::new(index_html),
+            permits: Arc::new(Semaphore::new(MAX_CONCURRENT_QUERIES)),
+        }
     }
 
     /// The node context behind this surface.
@@ -154,6 +176,24 @@ pub fn router(state: RestState) -> Router {
         .with_state(state)
 }
 
+/// Run one request's storage work, under the concurrency limit.
+///
+/// The permit is held for the whole blocking call and released when it
+/// returns, so at most [`MAX_CONCURRENT_QUERIES`] threads of the shared
+/// blocking pool are ever in explorer code.
+async fn query<T, F>(state: &RestState, f: F) -> Result<T, RpcError>
+where
+    F: FnOnce() -> Result<T, RpcError> + Send + 'static,
+    T: Send + 'static,
+{
+    let permit = Arc::clone(&state.permits).acquire_owned().await.map_err(|e| {
+        RpcError::new(RpcErrorCode::InternalError, format!("the explorer is shutting down: {e}"))
+    })?;
+    let result = blocking(f).await;
+    drop(permit);
+    result
+}
+
 /// `GET /` — the explorer page.
 async fn index(State(state): State<RestState>) -> Response {
     (
@@ -172,7 +212,8 @@ async fn stats(State(state): State<RestState>) -> Result<Json<StatsResponse>, Rp
     let peers = state.ctx.network().peers().await.len();
     let faucet_enabled = state.ctx.faucet_enabled();
     let (chain, mempool) = state.ctx.handles();
-    let body = blocking(move || explorer::stats(&*chain, &*mempool, peers, faucet_enabled)).await?;
+    let body =
+        query(&state, move || explorer::stats(&*chain, &*mempool, peers, faucet_enabled)).await?;
     Ok(Json(body))
 }
 
@@ -182,7 +223,7 @@ async fn block(
     Path(id): Path<String>,
 ) -> Result<Json<BlockResponse>, RpcError> {
     let chain = Arc::clone(state.ctx.chain());
-    Ok(Json(blocking(move || explorer::block_view(&*chain, &id)).await?))
+    Ok(Json(query(&state, move || explorer::block_view(&*chain, &id)).await?))
 }
 
 /// `GET /api/tx/{txid}`.
@@ -191,7 +232,7 @@ async fn transaction(
     Path(txid): Path<String>,
 ) -> Result<Json<TxResponse>, RpcError> {
     let (chain, mempool) = state.ctx.handles();
-    Ok(Json(blocking(move || explorer::tx_view(&*chain, &*mempool, &txid)).await?))
+    Ok(Json(query(&state, move || explorer::tx_view(&*chain, &*mempool, &txid)).await?))
 }
 
 /// `GET /api/address/{address}`.
@@ -200,7 +241,7 @@ async fn address(
     Path(address): Path<String>,
 ) -> Result<Json<AddressResponse>, RpcError> {
     let (chain, mempool) = state.ctx.handles();
-    Ok(Json(blocking(move || explorer::address_view(&*chain, &*mempool, &address)).await?))
+    Ok(Json(query(&state, move || explorer::address_view(&*chain, &*mempool, &address)).await?))
 }
 
 /// The `?q=` of `/api/search`.
@@ -217,7 +258,8 @@ async fn search(
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>, RpcError> {
     let chain = Arc::clone(state.ctx.chain());
-    Ok(Json(blocking(move || explorer::search(&*chain, &query.q)).await?))
+    let q = query.q;
+    Ok(Json(self::query(&state, move || explorer::search(&*chain, &q)).await?))
 }
 
 /// `POST /api/faucet`.
@@ -241,13 +283,16 @@ async fn faucet(
     let (chain, mempool) = state.ctx.handles();
     let requested = request.address.clone();
 
-    let (txid, transaction, address) = blocking(move || {
+    let (txid, transaction, address) = query(&state, move || {
         // A node with no genesis has nothing to spend; saying so up front
         // beats a confusing coin-selection error further down.
         chain.tip()?;
         let address = convert::parse_address(&requested, network)?;
-        let transaction = faucet.dispense(&address, &client)?;
-        let txid = mempool.submit(transaction.clone())?;
+        // The submission runs *inside* `dispense`, so a payment the mempool
+        // refuses gives the caller's quota back instead of burning a 24-hour
+        // window on a transaction that was never made.
+        let (transaction, txid) =
+            faucet.dispense(&address, &client, |tx| mempool.submit(tx.clone()))?;
         Ok((txid, transaction, address.encode()))
     })
     .await?;

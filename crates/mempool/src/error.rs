@@ -152,6 +152,31 @@ pub enum MempoolError {
         source: ScriptError,
     },
 
+    /// The transaction plus its unconfirmed ancestors is a longer chain than
+    /// policy allows.
+    ///
+    /// Chain depth is what makes block-template selection expensive: the
+    /// selector must place a parent before its child, so an unbounded chain
+    /// turns one template into an unbounded number of passes. Capping the
+    /// depth at admission is the only place the cost can be bounded.
+    #[error("the transaction has {count} unconfirmed ancestors, policy allows {max}")]
+    TooManyAncestors {
+        /// The transaction plus every unconfirmed ancestor it depends on.
+        count: usize,
+        /// `MempoolConfig::max_ancestors`.
+        max: usize,
+    },
+
+    /// The transaction plus its unconfirmed ancestors is more bytes than
+    /// policy allows.
+    #[error("the transaction's ancestor package is {size} bytes, policy allows {max}")]
+    AncestorPackageTooLarge {
+        /// Serialized bytes of the transaction plus every unconfirmed ancestor.
+        size: usize,
+        /// `MempoolConfig::max_ancestor_bytes`.
+        max: usize,
+    },
+
     /// The pool is at `max_bytes` and this transaction is the cheapest thing
     /// in it, so admitting it would only evict it again.
     #[error(

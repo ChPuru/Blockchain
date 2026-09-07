@@ -7,7 +7,7 @@
 //! | `height` | `be_u64(height)` | `block_hash[32]` — the **active** chain only |
 //! | `utxo` | `borsh(OutPoint)` (36 B) | `borsh(Coin)` |
 //! | `undo` | `block_hash[32]` | `borsh(UndoBlock)` |
-//! | `meta` | `&str` | raw bytes |
+//! | `meta` | `&str` | raw bytes (`tip`, `chain_id`, `schema_version`, `engine`, `index_height`) |
 //! | `tx_index` | `txid[32]` | `borsh(TxLocation)` |
 //! | `addr_index` | `addr_key ‖ be_u64(height) ‖ be_u32(tx_idx)` | `txid[32]` |
 //!
@@ -91,6 +91,16 @@ pub const META_CHAIN_ID: &str = "chain_id";
 pub const META_SCHEMA_VERSION: &str = "schema_version";
 /// `meta` key holding the one-byte consensus engine id of the tip.
 pub const META_ENGINE: &str = "engine";
+/// `meta` key holding `be_u64(height)`: the height the reverse index is
+/// complete to.
+///
+/// Absent means the index describes no block at all. The key exists because
+/// [`crate::StoreConfig::index_transactions`] is a *runtime* flag: the same
+/// datadir can be written by a run that maintained `tx_index`/`addr_index` and
+/// by a run that did not, and nothing on disk used to record which. A reader
+/// compares this height against `meta.tip`; anything but equality means the
+/// tables do not describe the active chain and must not be answered from.
+pub const META_INDEX_HEIGHT: &str = "index_height";
 
 /// How far a block has been validated.
 ///
@@ -374,6 +384,16 @@ pub fn decode_u32(kind: &'static str, b: &[u8]) -> Result<u32, StorageError> {
     Ok(u32::from_be_bytes(a))
 }
 
+/// Decode a big-endian `u64` meta value.
+///
+/// # Errors
+/// Returns [`StorageError::BadLength`] if the stored value is not eight bytes.
+pub fn decode_u64(kind: &'static str, b: &[u8]) -> Result<u64, StorageError> {
+    let a: [u8; 8] =
+        b.try_into().map_err(|_| StorageError::BadLength { kind, expected: 8, found: b.len() })?;
+    Ok(u64::from_be_bytes(a))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -394,7 +414,7 @@ mod tests {
 
     #[test]
     fn meta_keys_are_distinct() {
-        let keys = [META_TIP, META_CHAIN_ID, META_SCHEMA_VERSION, META_ENGINE];
+        let keys = [META_TIP, META_CHAIN_ID, META_SCHEMA_VERSION, META_ENGINE, META_INDEX_HEIGHT];
         let mut v = keys.to_vec();
         v.sort_unstable();
         v.dedup();
@@ -593,6 +613,13 @@ mod tests {
     fn decode_u32_round_trips_and_rejects_short_input() {
         assert_eq!(decode_u32("chain_id", &7u32.to_be_bytes()).unwrap(), 7);
         assert!(decode_u32("chain_id", &[0u8; 3]).is_err());
+    }
+
+    #[test]
+    fn decode_u64_round_trips_and_rejects_short_input() {
+        assert_eq!(decode_u64("index_height", &(1u64 << 40).to_be_bytes()).unwrap(), 1 << 40);
+        let e = decode_u64("index_height", &[0u8; 7]).unwrap_err();
+        assert!(matches!(e, StorageError::BadLength { expected: 8, found: 7, .. }), "{e:?}");
     }
 
     proptest! {

@@ -21,7 +21,11 @@
 //!    [`ferrum_chain::ValidationError::CoinbaseScriptSigLength`]).
 //! 3. **Rule 15** — no created outpoint may already exist in the UTXO set
 //!    ([`ferrum_chain::ValidationError::DuplicateOutPoint`]), which is defence in depth on
-//!    the inflation path and covers the non-coinbase case as well.
+//!    the inflation path and covers the non-coinbase case as well. Both
+//!    positions are built here: the coinbase's own outpoint
+//!    ([`colliding_outpoint`]) and a payment's
+//!    ([`colliding_non_coinbase_outpoint`]), because they are the same rule in
+//!    only one of the two orders the documents allow it to be checked in.
 //!
 //! **Red:** each of the three is rejected with its own variant.
 //! **Green:** the same block with an honest coinbase is accepted, and two
@@ -29,8 +33,9 @@
 
 use ferrum_types::{Amount, Coin, OutPoint, Script, Transaction, TxIn, TxOut};
 
-use crate::chain_builder::{BlockPlan, ChainBuilder};
+use crate::chain_builder::{BlockPlan, ChainBuilder, TxPlan};
 use crate::error::SimError;
+use crate::keys::Lock;
 use crate::scenarios::{Verdict, judge};
 
 /// A coinbase with an arbitrary `script_sig`, claiming nothing.
@@ -90,6 +95,48 @@ pub fn colliding_outpoint(chain: &mut ChainBuilder) -> Result<Verdict, SimError>
         },
     );
     judge(&pre, &block, &ctx)
+}
+
+/// The same collision, on the outpoint a **non-coinbase** transaction creates.
+///
+/// SPEC §3.3 keeps rule 15 after BIP-34 has already made a coinbase collision
+/// unreachable, and says why: "it also covers the case of a non-coinbase
+/// transaction colliding with an existing outpoint". [`colliding_outpoint`]
+/// seeds the collision on the coinbase's own outpoint, which is the one
+/// position rule 15 shares with rule 14 — so the case the specification keeps
+/// the rule *for* was the case no fixture built.
+///
+/// # Errors
+///
+/// [`SimError`] if the block cannot be built or the executors disagree.
+pub fn colliding_non_coinbase_outpoint(
+    chain: &mut ChainBuilder,
+) -> Result<(OutPoint, Verdict), SimError> {
+    let ctx = chain.next_ctx()?;
+    let coin = chain
+        .take_mature(1, ctx.height)
+        .into_iter()
+        .next()
+        .ok_or_else(|| SimError::fixture("no mature coin to spend"))?;
+    let tx = chain.build_tx(&TxPlan::sweep(
+        vec![coin],
+        Lock::P2pkh { key: 3 },
+        Amount::from_grains(1_000),
+    ))?;
+    let op = OutPoint::new(ChainBuilder::txid_of(&tx), 0);
+    let block = chain.build_block(&BlockPlan::with_txs(vec![tx]))?;
+
+    let mut pre = chain.state_view();
+    pre.insert(
+        op,
+        Coin {
+            value: Amount::from_grains(1),
+            script_pubkey: Script::new(vec![0x51]),
+            height: 0,
+            is_coinbase: false,
+        },
+    );
+    Ok((op, judge(&pre, &block, &ctx)?))
 }
 
 #[cfg(test)]
@@ -191,6 +238,20 @@ mod tests {
         match colliding_outpoint(&mut c).unwrap().rejection() {
             Some(ValidationError::DuplicateOutPoint { out_point }) => {
                 assert_eq!(out_point.vout, 0);
+            }
+            other => panic!("expected DuplicateOutPoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_coinbase_output_colliding_with_the_utxo_set_is_rejected() {
+        let mut c = crate::scenarios::matured_chain(XorShift64::SCENARIO_SEED, 3).unwrap();
+        let (seeded, verdict) = colliding_non_coinbase_outpoint(&mut c).unwrap();
+        match verdict.rejection() {
+            // The outpoint named must be the payment's, not the coinbase's:
+            // that is the case SPEC §3.3 says rule 15 is kept for.
+            Some(ValidationError::DuplicateOutPoint { out_point }) => {
+                assert_eq!(*out_point, seeded);
             }
             other => panic!("expected DuplicateOutPoint, got {other:?}"),
         }

@@ -80,14 +80,22 @@ proptest! {
         value in any::<u64>(),
         height in any::<u64>(),
         mtp in any::<u64>(),
+        // The coin's age is `u64` arithmetic on values a caller derives from
+        // chain data, and the relative-locktime rules add a 16-bit lock to it,
+        // so `None` and both extremes belong in the fuzzed surface.
+        coin_height in prop::option::of(any::<u64>()),
+        coin_mtp in prop::option::of(any::<u64>()),
     ) {
         let ctx = ExecCtx {
             chain_id: ChainId::DEVNET,
             tx: &tx,
             input_index: index,
             input_value: Amount::from_grains(value),
+            input_height: coin_height,
+            input_mtp_s: coin_mtp,
             block_height: height,
             block_mtp_s: mtp,
+            sighash_cache: None,
             limits: ScriptLimits::CONSENSUS,
         };
         let _ = eval(&Script::new(script), stack, &ctx);
@@ -120,8 +128,12 @@ proptest! {
         if let Ok(push) = ferrum_script::opcode::encode_push(&redeem) {
             unlock.extend_from_slice(&push);
         }
+        // With a caller-supplied sighash cache, which is the shape a validating
+        // caller uses and a different path through the machine's construction.
+        let cache = ferrum_script::SighashCache::new(&tx);
         let ctx = ExecCtx {
             input_value: Amount::from_grains(1_000),
+            sighash_cache: Some(&cache),
             ..ExecCtx::new(ChainId::MAINNET, &tx, 0)
         };
         let _ = verify(&Script::new(unlock), &script_pubkey, &ctx);

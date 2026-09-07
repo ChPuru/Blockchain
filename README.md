@@ -93,9 +93,9 @@ independently; if yours differ you are on a different chain, which is the check 
 
 | Network | Genesis block hash |
 |---|---|
-| mainnet | `6bfa4fee9e522a6071b5d7d04fc400144d9f519ba95b78d37346f7c597c4436c` |
-| testnet | `9edeafc16709d76a957c0b11587881cb0161dd19069fc25025fbdc4b4ff6e516` |
-| devnet  | `9167643790fc744081aa3656d33a4e02fc122b729198716563b2ee60db428444` |
+| mainnet | `8bfd7dc0fc73ed481b3891f433aee3f50f14a847a6de66ccbf2af3f4942ce229` |
+| testnet | `0271729260045601a991075df86e689acf74eec3aaa930b64513ada36ef18440` |
+| devnet  | `7747ccde4c1bae8d7f91913e9bcf2f5288c19a54ba0444ed7d21c49f9715008f` |
 
 All three share `timestamp_ms = 1735689600000` (2025-01-01T00:00:00Z), `version = 1` and
 `nonce = 0`; the 50 FRM subsidy is burned to an `OP_RETURN` committing to the network's parameters,

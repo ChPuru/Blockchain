@@ -73,7 +73,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use ferrum_chain::ValidationError;
-    use ferrum_script::{ExecCtx, ScriptError, ScriptLimits, verify};
+    use ferrum_script::{ExecCtx, ScriptError, verify};
     use ferrum_types::{OutPoint, Script, TxIn, TxOut, Txid};
 
     use super::*;
@@ -104,13 +104,9 @@ mod tests {
 
         let script_pubkey = lock.script_pubkey(&keys).unwrap();
         let ctx = ExecCtx {
-            chain_id: ChainId::MAINNET,
-            tx: &tx,
-            input_index: 0,
             input_value: value,
             block_height: 1,
-            block_mtp_s: 0,
-            limits: ScriptLimits::CONSENSUS,
+            ..ExecCtx::new(ChainId::MAINNET, &tx, 0)
         };
         // `OP_CHECKSIG` pushes false; the clean-stack rule then rejects the
         // input because the single remaining element is not true.

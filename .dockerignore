@@ -1,0 +1,21 @@
+# Build context hygiene: the image builds from source inside the container, so
+# none of this belongs in the context. target/ alone is several GB and would
+# dominate the upload.
+target/
+**/target/
+devnet/data/
+data/
+.git/
+.github/
+.claude/
+.remember/
+docs/research/
+*.redb
+*.redb.lock
+**/*.pdb
+node_modules/
+.env
+.env.*
+!.env.example
+testing/fuzz/corpus/
+testing/fuzz/artifacts/

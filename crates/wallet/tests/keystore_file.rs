@@ -328,3 +328,74 @@ fn the_default_iteration_count_is_a_real_work_factor() {
     // deliberate, reviewed change, not a typo.
     const { assert!(DEFAULT_PBKDF2_ITERATIONS >= 210_000) };
 }
+
+// ------------------------------------------------- permissions and durability
+
+/// The keystore holds the mnemonic, and the default passphrase in
+/// `chain-cli` is the empty string. A 0644 file is therefore a published
+/// wallet on any shared host.
+#[cfg(unix)]
+#[test]
+fn the_keystore_is_created_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = TempDir::new().unwrap();
+    let mut store = create(&dir, "");
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(store.path()), 0o600, "a fresh keystore must not be world-readable");
+
+    // And a rewrite must not widen it again: `rename` carries the temporary
+    // file's mode onto the destination.
+    store.set_meta(WalletMeta { account: 0, next_receive_index: 1, next_change_index: 0 }).unwrap();
+    assert_eq!(mode(store.path()), 0o600, "set_meta widened the keystore's permissions");
+}
+
+#[test]
+fn a_leftover_temp_file_does_not_wedge_the_keystore() {
+    let dir = TempDir::new().unwrap();
+    let mut store = create(&dir, "pw");
+    let mut tmp = store.path().to_path_buf().into_os_string();
+    tmp.push(".tmp");
+    // What a crash between the write and the rename leaves behind.
+    std::fs::write(std::path::PathBuf::from(&tmp), b"half a keystore").unwrap();
+
+    store.set_meta(WalletMeta { account: 0, next_receive_index: 3, next_change_index: 1 }).unwrap();
+    let reopened = Keystore::open(store.path(), "pw").unwrap();
+    assert_eq!(reopened.meta().next_receive_index, 3);
+}
+
+// --------------------------------------------------------- check versus MAC
+
+#[test]
+fn a_damaged_check_value_is_not_reported_as_a_wrong_passphrase() {
+    let dir = TempDir::new().unwrap();
+    let store = create(&dir, "pw");
+    let path = store.path().to_path_buf();
+    drop(store);
+
+    let mut file: KeystoreFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut bytes = hex::decode(&file.check).unwrap();
+    bytes[0] ^= 0x01;
+    file.check = hex::encode(&bytes);
+    std::fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+
+    // `check` is outside the MAC, so it is a hint and not evidence. The tag
+    // still authenticates the ciphertext under a key only the right
+    // passphrase produces, so this wallet is intact and must open — telling
+    // the user their passphrase is wrong is how a recoverable wallet gets
+    // deleted with `wallet new --force`.
+    let reopened = Keystore::open(&path, "pw").unwrap();
+    assert_eq!(reopened.mnemonic().phrase(), mnemonic().phrase());
+}
+
+#[test]
+fn a_wrong_passphrase_is_still_a_wrong_passphrase() {
+    let dir = TempDir::new().unwrap();
+    let store = create(&dir, "pw");
+    let path = store.path().to_path_buf();
+    drop(store);
+    // The MAC key is passphrase-derived, so a typo fails *both* comparisons;
+    // it must still be named a typo rather than corruption.
+    assert!(matches!(Keystore::open(&path, "nope"), Err(WalletError::WrongPassphrase)));
+}

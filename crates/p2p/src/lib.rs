@@ -107,6 +107,7 @@ mod source_audit {
         ("limits.rs", include_str!("limits.rs")),
         ("message.rs", include_str!("message.rs")),
         ("service.rs", include_str!("service.rs")),
+        ("service/responder.rs", include_str!("service/responder.rs")),
         ("service/worker.rs", include_str!("service/worker.rs")),
         ("service/worker/events.rs", include_str!("service/worker/events.rs")),
     ];

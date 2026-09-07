@@ -14,7 +14,7 @@ use ferrum_types::{
     Transaction, Txid,
 };
 
-use crate::apply::apply_block;
+use crate::apply::{apply_block, max_block_sig_checks};
 use crate::ctx::BlockCtx;
 use crate::error::ValidationError;
 use crate::tests::support::{
@@ -419,4 +419,345 @@ fn a_signature_made_for_the_wrong_chain_never_validates_anywhere() {
             source: ScriptError::EvalFalse,
         })
     );
+}
+
+// ------------------------------------- SPEC §4.4 relative locktime (BIP-68)
+//
+// `OP_CHECKSEQUENCEVERIFY` compares the script's operand against the input's
+// own `sequence`, which the *spender* writes. That is only half of a timelock.
+// The other half — the one that makes it a lock on time rather than a lock on
+// the spender's honesty — is the rule below: the coin must actually be old
+// enough for the `sequence` it is spent with.
+
+/// A pre-state holding one ordinary coin created at `coin_height`.
+fn aged_coin(coin_height: u64) -> (OutPoint, ferrum_storage::MapView) {
+    let funded = OutPoint::new(Txid(Hash32::from_bytes([41; 32])), 0);
+    (funded, map_view(&[(funded, coin(amount(1_000), coin_height, false))]))
+}
+
+/// A block at `height` whose only non-coinbase input spends `funded` with
+/// `sequence`, paying a 100-grain fee.
+fn block_spending_with_sequence(
+    params: &ChainParams,
+    prev: BlockHash,
+    height: u64,
+    funded: OutPoint,
+    sequence: u32,
+    script_pubkey: Script,
+) -> Block {
+    let mut tx = spend(&[funded], &[(amount(900), script_pubkey)]);
+    tx.inputs[0].sequence = sequence;
+    let reward = params.block_subsidy(height).checked_add(amount(100)).unwrap();
+    block_of(vec![coinbase(height, reward, b"n"), tx], prev, BLOCK_MS, params.genesis_bits)
+}
+
+#[test]
+fn a_relative_locktime_of_ten_blocks_is_not_satisfied_by_a_one_block_old_coin() {
+    let params = devnet();
+    let (parent, prev, _) = scene(&params);
+    let ctx = ctx_at(1, &parent, MTP_S, &params);
+    let (funded, pre) = aged_coin(0);
+    let block =
+        block_spending_with_sequence(&params, prev, 1, funded, 10, any_spend_script());
+    assert_eq!(
+        apply_block(&pre, &block, &ctx),
+        Err(ValidationError::UnsatisfiedRelativeLock {
+            tx_index: 1,
+            input_index: 0,
+            sequence: 10,
+            required: 10,
+            coin_height: 0,
+            spend_height: 1,
+        }),
+        "a coin one block old cannot satisfy a ten-block relative lock"
+    );
+}
+
+#[test]
+fn a_relative_locktime_is_satisfied_once_the_coin_is_old_enough() {
+    let params = devnet();
+    let (parent, prev, _) = scene(&params);
+    let ctx = ctx_at(10, &parent, MTP_S, &params);
+    let (funded, pre) = aged_coin(0);
+    let block =
+        block_spending_with_sequence(&params, prev, 10, funded, 10, any_spend_script());
+    assert!(
+        apply_block(&pre, &block, &ctx).is_ok(),
+        "height 10 is exactly ten blocks after the coin's height 0"
+    );
+}
+
+#[test]
+fn a_relative_locktime_one_block_short_is_still_rejected() {
+    let params = devnet();
+    let (parent, prev, _) = scene(&params);
+    let ctx = ctx_at(9, &parent, MTP_S, &params);
+    let (funded, pre) = aged_coin(0);
+    let block = block_spending_with_sequence(&params, prev, 9, funded, 10, any_spend_script());
+    assert!(
+        matches!(
+            apply_block(&pre, &block, &ctx),
+            Err(ValidationError::UnsatisfiedRelativeLock { spend_height: 9, .. })
+        ),
+        "the boundary is >=, and nine blocks is one short of ten"
+    );
+}
+
+#[test]
+fn a_sequence_with_the_disable_bit_set_is_not_a_relative_lock() {
+    let params = devnet();
+    let (parent, prev, _) = scene(&params);
+    let ctx = ctx_at(1, &parent, MTP_S, &params);
+    let (funded, pre) = aged_coin(0);
+    // The wallet's own choice: one below SEQUENCE_FINAL keeps `lock_time`
+    // live while bit 31 opts the input out of BIP-68 entirely.
+    let block =
+        block_spending_with_sequence(&params, prev, 1, funded, 0xffff_fffe, any_spend_script());
+    assert!(apply_block(&pre, &block, &ctx).is_ok(), "bit 31 disables the relative lock");
+}
+
+#[test]
+fn a_zero_relative_locktime_locks_nothing() {
+    let params = devnet();
+    let (parent, prev, _) = scene(&params);
+    let ctx = ctx_at(1, &parent, MTP_S, &params);
+    let (funded, pre) = aged_coin(0);
+    let block = block_spending_with_sequence(&params, prev, 1, funded, 0, any_spend_script());
+    assert!(apply_block(&pre, &block, &ctx).is_ok(), "a lock of zero blocks is no lock");
+}
+
+#[test]
+fn the_five_hundred_and_twelve_second_flavour_fails_closed() {
+    let params = devnet();
+    let (parent, prev, _) = scene(&params);
+    let ctx = ctx_at(1, &parent, MTP_S, &params);
+    let (funded, pre) = aged_coin(0);
+    // Bit 22 set: the low bits count 512-second units, which needs the median
+    // time past of the block that created the coin. The seam cannot see it.
+    let sequence = 1 << 22 | 1;
+    let block = block_spending_with_sequence(&params, prev, 1, funded, sequence, any_spend_script());
+    assert_eq!(
+        apply_block(&pre, &block, &ctx),
+        Err(ValidationError::UnsupportedRelativeTimeLock {
+            tx_index: 1,
+            input_index: 0,
+            sequence,
+        }),
+        "an unenforceable timelock must fail closed, not silently pass"
+    );
+}
+
+#[test]
+fn a_checksequenceverify_output_cannot_be_spent_early() {
+    // The end-to-end shape from the finding: a coin locked with
+    // `<10> OP_CHECKSEQUENCEVERIFY OP_DROP OP_1`, spent one block later with
+    // `sequence = 10`. The script half is satisfied — the operand equals the
+    // sequence the spender wrote — so only the chain half can reject it.
+    let params = devnet();
+    let (parent, prev, _) = scene(&params);
+    let ctx = ctx_at(1, &parent, MTP_S, &params);
+    // OP_10 (0x5a), OP_CHECKSEQUENCEVERIFY (0xb2), OP_DROP (0x75), OP_1 (0x51)
+    let csv_lock = Script::new(vec![0x5a, 0xb2, 0x75, 0x51]);
+    let funded = OutPoint::new(Txid(Hash32::from_bytes([42; 32])), 0);
+    let pre = map_view(&[(
+        funded,
+        Coin { value: amount(1_000), script_pubkey: csv_lock, height: 0, is_coinbase: false },
+    )]);
+    let block = block_spending_with_sequence(&params, prev, 1, funded, 10, any_spend_script());
+    assert_eq!(
+        apply_block(&pre, &block, &ctx),
+        Err(ValidationError::UnsatisfiedRelativeLock {
+            tx_index: 1,
+            input_index: 0,
+            sequence: 10,
+            required: 10,
+            coin_height: 0,
+            spend_height: 1,
+        }),
+        "OP_CHECKSEQUENCEVERIFY is only a timelock if the chain checks the coin's age"
+    );
+}
+
+// ----------------------------- SPEC §3.3 rule 15, and the coinbase's outputs
+//
+// Rule 15 is "no created output already exists **in the UTXO set**", and SPEC
+// §3.3 puts it last — after the coinbase's value and BIP-34 rules. Both halves
+// matter: "in the UTXO set" means the parent's state, not the overlay this
+// block has already been spending from, and "last" is what decides which rule
+// a block breaking two of them is rejected for.
+
+#[test]
+fn a_non_coinbase_collision_is_reported_after_the_coinbase_value_rule() {
+    let params = devnet();
+    let (_, prev, ctx) = scene(&params);
+    let funded = OutPoint::new(Txid(Hash32::from_bytes([25; 32])), 0);
+    let tx = spend(&[funded], &[(amount(900), any_spend_script())]);
+    let collision = out_point(&tx, 0);
+    let pre = map_view(&[
+        (funded, coin(amount(1_000), 0, false)),
+        (collision, coin(amount(3), 0, false)),
+    ]);
+    // The coinbase claims one grain more than subsidy + fees, so rules 13 and
+    // 15 are both broken. SPEC §3.3 numbers the value rule 13 and the
+    // collision rule 15.
+    let reward = params.block_subsidy(1).checked_add(amount(101)).unwrap();
+    let block = block_with(vec![coinbase(1, reward, b"n"), tx], prev, &params);
+    assert_eq!(
+        apply_block(&pre, &block, &ctx),
+        Err(ValidationError::CoinbaseOverpayment {
+            claimed: reward,
+            allowed: params.block_subsidy(1).checked_add(amount(100)).unwrap(),
+        }),
+        "rule 15 is checked last, after the coinbase's value"
+    );
+}
+
+#[test]
+fn spending_the_colliding_coin_in_the_same_block_does_not_hide_the_collision() {
+    // The BIP-30 backstop is defence in depth on the inflation path, so it
+    // must be read against the *parent's* UTXO set. Checked against the
+    // block's own overlay it is defeated by spending the colliding coin
+    // earlier in the same block, and `Store::connect_block` then inserts the
+    // new coin and removes it again — destroying the block's own output.
+    let params = devnet();
+    let (_, prev, ctx) = scene(&params);
+    let funded = OutPoint::new(Txid(Hash32::from_bytes([61; 32])), 0);
+    // `later` creates the outpoint; `earlier` spends the coin already sitting
+    // at it, which is what makes the overlay forget it exists.
+    let later = spend(&[funded], &[(amount(900), any_spend_script())]);
+    let collision = out_point(&later, 0);
+    let earlier = spend(&[collision], &[(amount(400), any_spend_script())]);
+    let pre = map_view(&[
+        (funded, coin(amount(1_000), 0, false)),
+        (collision, coin(amount(500), 0, false)),
+    ]);
+    let reward = params.block_subsidy(1).checked_add(amount(200)).unwrap();
+    let block = block_with(vec![coinbase(1, reward, b"n"), earlier, later], prev, &params);
+    assert_eq!(
+        apply_block(&pre, &block, &ctx),
+        Err(ValidationError::DuplicateOutPoint { out_point: collision }),
+        "rule 15 reads the parent's UTXO set, not the post-spend overlay"
+    );
+}
+
+/// A block at height 1 whose transaction 1 spends the block's own coinbase.
+fn block_spending_its_own_coinbase(params: &ChainParams, prev: BlockHash) -> (OutPoint, Block) {
+    let subsidy = params.block_subsidy(1);
+    let cb = coinbase(1, subsidy, b"n");
+    let own = out_point(&cb, 0);
+    // No fee, so the coinbase's own value rule is satisfied either way and the
+    // verdict is about rule 12 alone.
+    let tx = spend(&[own], &[(subsidy, any_spend_script())]);
+    (own, block_with(vec![cb, tx], prev, params))
+}
+
+#[test]
+fn a_transaction_naming_this_block_s_own_coinbase_output_is_missing_input() {
+    // SPEC §3.3 rule 12: the coinbase's outputs are *not* in the overlay its
+    // own block is validated against — they join the UTXO set when the block
+    // is connected. So the verdict is `MissingInput`, and specifically not
+    // `ImmatureCoinbaseSpend`: the coin is not there to be immature.
+    let params = devnet();
+    let (_, prev, ctx) = scene(&params);
+    let (own, block) = block_spending_its_own_coinbase(&params, prev);
+    assert_eq!(
+        apply_block(&EmptyView, &block, &ctx),
+        Err(ValidationError::MissingInput { tx_index: 1, out_point: own })
+    );
+}
+
+#[test]
+fn the_verdict_on_a_same_block_coinbase_spend_does_not_depend_on_maturity() {
+    // The half of rule 12 that is worth a test of its own. Under the other
+    // reading — coinbase outputs published into the overlay — a maturity of 0
+    // makes this block *valid*, and rule 13 would then bound the coinbase's
+    // value using a fee paid by a transaction spending that very output.
+    // Excluding them removes the circularity, so the answer is `MissingInput`
+    // at every maturity.
+    let params = devnet_with(|p| p.coinbase_maturity = 0);
+    let (_, prev, ctx) = scene(&params);
+    let (own, block) = block_spending_its_own_coinbase(&params, prev);
+    assert_eq!(
+        apply_block(&EmptyView, &block, &ctx),
+        Err(ValidationError::MissingInput { tx_index: 1, out_point: own }),
+        "rule 12 is independent of coinbase_maturity"
+    );
+}
+
+// ------------------------------------ the block's signature-check budget
+//
+// `MAX_OPS` bounds one input, not one block, and `OP_CHECKMULTISIG` charges
+// `1 + n` operations for up to `n` verifications. The expensive script lives in
+// the `script_pubkey`, which is already in the UTXO set, so a spending input
+// costs its author ~44 bytes and every node ~190 Schnorr verifications. The
+// budget below is what restores proportionality between the two.
+
+/// A `script_pubkey` demanding exactly `checks` signature checks against one
+/// key, reusing a single pushed signature with `OP_DUP`.
+fn many_checksig_script(pubkey: &[u8], checks: usize) -> Script {
+    let push_key = encode_push(pubkey).expect("32 bytes is a direct push");
+    let mut bytes = Vec::new();
+    for _ in 1..checks {
+        bytes.push(0x76); // OP_DUP — keep the signature for the next check
+        bytes.extend_from_slice(&push_key);
+        bytes.push(0xac); // OP_CHECKSIG
+        bytes.push(0x69); // OP_VERIFY
+    }
+    bytes.extend_from_slice(&push_key);
+    bytes.push(0xac); // the last check leaves the truthy element behind
+    Script::new(bytes)
+}
+
+/// A block whose single spend demands `checks` signature verifications.
+fn block_demanding_sig_checks(
+    params: &ChainParams,
+    prev: BlockHash,
+    checks: usize,
+) -> (ferrum_storage::MapView, Block) {
+    let key = replay_key();
+    let script_pubkey = many_checksig_script(key.public_key().as_bytes(), checks);
+    let funded = OutPoint::new(Txid(Hash32::from_bytes([53; 32])), 0);
+    let value = amount(1_000);
+    let pre = map_view(&[(
+        funded,
+        Coin { value, script_pubkey: script_pubkey.clone(), height: 0, is_coinbase: false },
+    )]);
+
+    let mut tx = spend(&[funded], &[(amount(900), any_spend_script())]);
+    let digest =
+        signature_hash(&tx, 0, script_pubkey.as_bytes(), value, params.chain_id, SigHashType::ALL)
+            .expect("a single-input SIGHASH_ALL preimage always builds");
+    let signature = encode_signature(&key.sign_deterministic(&digest), SigHashType::ALL);
+    tx.inputs[0].script_sig = Script::new(encode_push(&signature).expect("65 bytes pushes"));
+
+    let reward = params.block_subsidy(1).checked_add(amount(100)).unwrap();
+    (pre, block_with(vec![coinbase(1, reward, b"n"), tx], prev, params))
+}
+
+#[test]
+fn the_budget_is_proportional_to_the_block_size_limit() {
+    assert_eq!(max_block_sig_checks(&devnet()), 20_000, "one check per 50 bytes of a 1 MB block");
+    assert_eq!(max_block_sig_checks(&devnet_with(|p| p.max_block_size = 1_000)), 20);
+}
+
+#[test]
+fn a_block_over_the_signature_check_budget_is_rejected() {
+    // A budget of 20, and 44 bytes of block space buying 21 verifications.
+    let params = devnet_with(|p| p.max_block_size = 1_000);
+    let (_, prev, ctx) = scene(&params);
+    let (pre, block) = block_demanding_sig_checks(&params, prev, 21);
+    assert_eq!(
+        apply_block(&pre, &block, &ctx),
+        Err(ValidationError::SigCheckBudgetExceeded { used: 21, budget: 20 })
+    );
+}
+
+#[test]
+fn a_block_exactly_at_the_signature_check_budget_is_accepted() {
+    // The control: the budget is a limit, not an off-by-one that rejects
+    // honest blocks. Every one of these twenty checks really verifies.
+    let params = devnet_with(|p| p.max_block_size = 1_000);
+    let (_, prev, ctx) = scene(&params);
+    let (pre, block) = block_demanding_sig_checks(&params, prev, 20);
+    assert!(apply_block(&pre, &block, &ctx).is_ok(), "twenty checks is the budget, not over it");
 }

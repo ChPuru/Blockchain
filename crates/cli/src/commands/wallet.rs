@@ -47,12 +47,30 @@ async fn open_or_create(ctx: &Context, source: &PassphraseSource) -> CliResult<W
     paths::ensure_dir(&ctx.datadir)?;
     let network = ctx.probe_network().await.unwrap_or(Network::Devnet);
     let passphrase = source.resolve(false)?;
+    warn_if_unprotected(&passphrase, &path);
     let (wallet, mnemonic) =
         Wallet::create(&path, network, &passphrase, DEFAULT_WORDS, &mut rand::rngs::OsRng)?;
     eprintln!("created a new {} wallet at {}", network.name(), path.display());
     eprintln!("mnemonic: {}", mnemonic.phrase());
     eprintln!("write it down: the plaintext seed never touches disk.");
     Ok(wallet)
+}
+
+/// Say so, on stderr, when a keystore is being sealed with no passphrase.
+///
+/// The empty passphrase is the documented default (see [`crate::passphrase`])
+/// because devnet automation needs it, but PBKDF2 over a known passphrase and
+/// a salt stored in the same file is obfuscation, not encryption: whoever can
+/// read `wallet.json` holds the mnemonic. The file is created owner-only, so
+/// this is a warning rather than a refusal — but it must not be silent.
+fn warn_if_unprotected(passphrase: &str, path: &Path) {
+    if passphrase.is_empty() {
+        eprintln!("warning: sealing {} with an empty passphrase.", path.display());
+        eprintln!(
+            "         anyone who can read that file holds every coin this wallet controls; use \
+             --passphrase-file or --prompt-passphrase."
+        );
+    }
 }
 
 /// Mnemonic length used when a wallet is created implicitly.
@@ -105,6 +123,7 @@ pub async fn new(
     paths::ensure_dir(&ctx.datadir)?;
 
     let passphrase = source.resolve(true)?;
+    warn_if_unprotected(&passphrase, &path);
     let (mut wallet, mnemonic) =
         Wallet::create(&path, network, &passphrase, words, &mut rand::rngs::OsRng)?;
     let address = wallet.new_address()?;
@@ -311,6 +330,23 @@ pub async fn send(
     }
 
     let client = ctx.client()?;
+
+    // Two `wallet send` calls inside one block interval build against the same
+    // *confirmed* UTXO set — `listunspent` and `gettxout` never report the
+    // mempool — and the in-memory coin reservation dies with the process. If
+    // the two builds agree byte for byte the mempool answers "already in the
+    // pool", `sendrawtransaction` reports that as a plain success, and the
+    // operator is told they made a payment they did not make. Ask the node
+    // first: it already knowing this txid means it already holds this exact
+    // transaction. Any other answer (not found, or no index to look in) means
+    // it does not, so a node that cannot answer never blocks a payment.
+    if client.get_raw_transaction(txid.to_string(), Some(false)).await.is_ok() {
+        return Err(CliError::already_broadcast(format!(
+            "the node already holds transaction {txid}; it was broadcast before and has not \
+             confirmed yet, so sending it again would pay {to} nothing further"
+        )));
+    }
+
     let returned =
         client.send_raw_transaction(hex_envelope).await.map_err(rpc_err("sendrawtransaction"))?;
 

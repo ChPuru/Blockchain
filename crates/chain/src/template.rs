@@ -15,7 +15,7 @@
 //! script-verified — rather than trusted.
 
 use ferrum_consensus::{BlockTemplate, EngineRouter, HeaderView};
-use ferrum_script::{ExecCtx, ScriptLimits, verify};
+use ferrum_script::{ExecCtx, ScriptLimits, SighashCache, verify};
 use ferrum_storage::{OverlayView, StateView, Store, txid};
 use ferrum_types::{
     Amount, Block, BlockHeader, BlockSeal, ChainParams, Coin, HEADER_SIZE, OutPoint, Script,
@@ -33,19 +33,35 @@ pub const BLOCK_FIXED_OVERHEAD: usize = HEADER_SIZE.saturating_add(4);
 
 /// Borsh size of a [`BlockSeal`] with an empty payload: `u8` engine plus the
 /// `u32` length of an empty `Vec`.
+///
+/// The seal is **not** part of the size a template budgets against
+/// `max_block_size`; see [`block_size_of`]. This is the wire cost of a
+/// proof-of-work seal, kept for callers that size a whole encoded block.
 pub const EMPTY_SEAL_SIZE: usize = 5;
 
 /// The block version templates are built with.
 pub const TEMPLATE_VERSION: u32 = 1;
 
-/// Serialized size of a block made of `txs` with an empty proof-of-work seal.
+/// The size a block made of `txs` is measured at by the block-size rule: the
+/// header, the transaction count and the transactions, **without the seal**.
 ///
 /// Computed arithmetically so that assembly can test the limit after every
 /// added transaction without re-encoding the whole block. A test pins it to
-/// [`Block::serialized_size`].
+/// [`Block::consensus_size`].
+///
+/// # Why the seal is not counted
+///
+/// SPEC §3.1 rule 1 measures exactly this quantity (DECISIONS D12). Budgeting
+/// the seal here would be wrong in both directions: the five bytes of an empty
+/// seal are not what a BFT height produces — a four-validator certificate is
+/// 251 bytes, and one per extra validator more — and reserving the worst case
+/// instead would shrink every block by `66·n` bytes to protect a rule that no
+/// longer counts it. The certificate is bounded on its own by
+/// [`ferrum_types::BlockSeal::max_data_len`], so a full template plus any legal
+/// seal is still a valid block.
 #[must_use]
 pub fn block_size_of(txs: &[Transaction]) -> usize {
-    let mut n = BLOCK_FIXED_OVERHEAD.saturating_add(EMPTY_SEAL_SIZE);
+    let mut n = BLOCK_FIXED_OVERHEAD;
     for tx in txs {
         n = n.saturating_add(tx_body_size(tx));
     }
@@ -86,6 +102,20 @@ pub fn build_coinbase(
         outputs: vec![TxOut::new(value, payout.clone())],
         lock_time: 0,
     })
+}
+
+/// The largest seal the engine at this height can attach, as a stand-in block
+/// would carry it.
+///
+/// Only the debug assertion uses it, and only to make the check engine-aware:
+/// [`Block::consensus_size`] ignores the seal by construction, so a template
+/// that is within budget stays within budget whatever certificate is attached.
+fn engine_seal_placeholder(engine_id: u8, params: &ChainParams) -> BlockSeal {
+    if engine_id == BlockSeal::ENGINE_BFT {
+        BlockSeal::bft(vec![0u8; BlockSeal::max_data_len(params.bft_validators.len())])
+    } else {
+        BlockSeal::POW
+    }
 }
 
 /// Assemble a candidate block on top of the current tip.
@@ -185,8 +215,13 @@ pub fn build_template(
         nonce: 0,
     };
 
+    // Compared against the seal the *active engine* will attach, not against a
+    // proof-of-work seal: a template built at a BFT height is sealed with a
+    // commit certificate, and an assertion that only ever holds for an empty
+    // seal is an assertion about the wrong block.
     debug_assert_eq!(
-        Block::new(header, block_txs.clone(), BlockSeal::POW).serialized_size(),
+        Block::new(header, block_txs.clone(), engine_seal_placeholder(engine.engine_id(), params))
+            .consensus_size(),
         block_size_of(&block_txs),
         "incremental size accounting must match the encoder"
     );
@@ -247,14 +282,27 @@ fn admit(
         return Ok(None);
     };
 
+    // One set of sighash mid-states for the whole transaction: without it each
+    // input re-hashes every prevout, sequence and output, and template building
+    // becomes quadratic in transaction size.
+    let sighash_cache = SighashCache::new(tx);
     for (input_index, (input, coin)) in tx.inputs.iter().zip(coins.iter()).enumerate() {
         let exec = ExecCtx {
             chain_id: params.chain_id,
             tx,
             input_index,
             input_value: coin.value,
+            // The coin's own height is what BIP-68's block-count flavour counts
+            // from. The 512-second flavour needs the median time past of the
+            // block that created the coin, which the overlay does not carry, so
+            // it is left unset: a relative timelock the template cannot prove
+            // has matured fails closed and the candidate is simply not
+            // included, which is policy, not a consensus verdict.
+            input_height: Some(coin.height),
+            input_mtp_s: None,
             block_height: height,
             block_mtp_s: mtp_s,
+            sighash_cache: Some(&sighash_cache),
             limits: ScriptLimits::CONSENSUS,
         };
         if verify(&input.script_sig, &coin.script_pubkey, &exec).is_err() {

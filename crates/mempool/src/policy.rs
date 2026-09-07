@@ -44,6 +44,25 @@ pub const DEFAULT_EXPIRY_BLOCKS: u64 = 336;
 /// silently 2.4 % off.
 pub const FEE_RATE_DIVISOR: u64 = 1_000;
 
+/// Default cap on an ancestor package: the transaction plus its unconfirmed
+/// ancestors, counted as transactions.
+///
+/// 25 is Bitcoin Core's `-limitancestorcount`, and the reason is the same:
+/// block-template selection must place a parent before its child, so the
+/// number of passes a template costs is the depth of the deepest chain in the
+/// pool. Without a cap that depth is bounded only by `max_bytes`, and a
+/// 30 000-deep chain of 200-byte transactions — six megabytes, a few hundredths
+/// of a coin in fees — makes every template quadratic in the pool size while
+/// the pool lock is held.
+pub const DEFAULT_MAX_ANCESTORS: usize = 25;
+
+/// Default cap on an ancestor package in bytes.
+///
+/// 101 000 is Bitcoin Core's `-limitancestorsize` (101 kvB), one kilobyte
+/// above [`MAX_STANDARD_TX_SIZE`] so that a single maximum-size transaction is
+/// always its own admissible package.
+pub const DEFAULT_MAX_ANCESTOR_BYTES: usize = 101_000;
+
 /// The largest transaction this node relays, in bytes.
 ///
 /// A tenth of `max_block_size`, which is Bitcoin Core's ratio and its reason:
@@ -56,12 +75,15 @@ pub const MAX_STANDARD_TX_SIZE: usize = 100_000;
 ///
 /// # Deviation from CONTRACT §9
 ///
-/// The contract lists four fields; this struct carries a fifth, `params`.
+/// The contract lists four fields; this struct carries three more. `params`
 /// [`crate::Mempool::new`] takes nothing but a `MempoolConfig`, and acceptance
 /// cannot be performed without the chain parameters: script verification needs
 /// `chain_id` (a signature valid on testnet must not verify on mainnet), the
 /// maturity rule needs `coinbase_maturity`, and the fee floor's default comes
-/// from `min_relay_fee_per_kb`. The four contract fields keep their exact
+/// from `min_relay_fee_per_kb`. `max_ancestors` and `max_ancestor_bytes` are
+/// the chain-depth limits the contract does not name and that
+/// [`crate::Mempool::select_for_block`] needs in order to have a bounded cost;
+/// see [`DEFAULT_MAX_ANCESTORS`]. The four contract fields keep their exact
 /// names, types and defaults.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MempoolConfig {
@@ -73,6 +95,12 @@ pub struct MempoolConfig {
     pub min_fee_rate: u64,
     /// How many blocks an entry may sit in the pool before it is expired.
     pub expiry_blocks: u64,
+    /// How many transactions an ancestor package may hold, the transaction
+    /// itself included.
+    pub max_ancestors: usize,
+    /// How many serialized bytes an ancestor package may hold, the
+    /// transaction itself included.
+    pub max_ancestor_bytes: usize,
     /// The chain this pool is relaying for.
     pub params: ChainParams,
 }
@@ -90,6 +118,8 @@ impl MempoolConfig {
             max_orphans: DEFAULT_MAX_ORPHANS,
             min_fee_rate,
             expiry_blocks: DEFAULT_EXPIRY_BLOCKS,
+            max_ancestors: DEFAULT_MAX_ANCESTORS,
+            max_ancestor_bytes: DEFAULT_MAX_ANCESTOR_BYTES,
             params,
         }
     }
@@ -119,6 +149,20 @@ impl MempoolConfig {
     #[must_use]
     pub fn with_expiry_blocks(mut self, expiry_blocks: u64) -> Self {
         self.expiry_blocks = expiry_blocks;
+        self
+    }
+
+    /// Builder: change the ancestor-package ceiling, in transactions.
+    #[must_use]
+    pub fn with_max_ancestors(mut self, max_ancestors: usize) -> Self {
+        self.max_ancestors = max_ancestors;
+        self
+    }
+
+    /// Builder: change the ancestor-package ceiling, in bytes.
+    #[must_use]
+    pub fn with_max_ancestor_bytes(mut self, max_ancestor_bytes: usize) -> Self {
+        self.max_ancestor_bytes = max_ancestor_bytes;
         self
     }
 }

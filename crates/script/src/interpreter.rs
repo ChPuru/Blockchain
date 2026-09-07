@@ -38,6 +38,7 @@ use crate::limits::ScriptLimits;
 use crate::num::cast_to_bool;
 use crate::opcode::{Instruction, OP_PUSHBYTES_MAX, Opcode};
 use crate::parse::parse;
+use crate::sighash::SighashCache;
 
 /// The interpreter's data stack: a stack of byte strings, bottom first.
 pub type Stack = Vec<Vec<u8>>;
@@ -47,6 +48,17 @@ pub type Stack = Vec<Vec<u8>>;
 /// There is no clock and no randomness here: `block_height` and `block_mtp_s`
 /// are supplied by the caller, which keeps the whole VM a pure function of its
 /// inputs.
+///
+/// `input_height` and `input_mtp_s` describe the coin being spent rather than
+/// the block doing the spending. They are what turns
+/// `OP_CHECKSEQUENCEVERIFY` into an actual timelock: the script half of
+/// BIP-112 only compares two numbers the *spender* wrote, and a relative
+/// locktime exists only once the input's `sequence` is also measured against
+/// the age of the coin it spends (BIP-68). Both are `Option` so that a caller
+/// which genuinely cannot say how old the coin is — `chain-cli script eval`,
+/// a wallet's own pre-broadcast check — fails a relative locktime **closed**
+/// with [`ScriptError::UnknownCoinHeight`] / [`ScriptError::UnknownCoinTime`]
+/// instead of passing it silently.
 #[derive(Debug)]
 pub struct ExecCtx<'a> {
     /// The network this signature must have been made for. Signing over it is
@@ -58,24 +70,47 @@ pub struct ExecCtx<'a> {
     pub input_index: usize,
     /// The value of the output being spent, committed to by the sighash.
     pub input_value: Amount,
+    /// Height of the block that created the output being spent — the reference
+    /// point for the block-count flavour of BIP-68.
+    pub input_height: Option<u64>,
+    /// Median time past in **seconds** of the block that created the output
+    /// being spent — the reference point for the 512-second flavour of BIP-68.
+    pub input_mtp_s: Option<u64>,
     /// Height of the block containing [`ExecCtx::tx`].
     pub block_height: u64,
     /// Median time past in **seconds**, for a timestamp-flavoured CLTV.
     pub block_mtp_s: u64,
+    /// The transaction-wide sighash mid-states, shared across every input of
+    /// one transaction.
+    ///
+    /// Optional, and only an optimisation — but the difference between linear
+    /// and quadratic validation. A caller that verifies every input of a
+    /// transaction in a loop should build one [`SighashCache`] for the
+    /// transaction and hand the same reference to every `ExecCtx`; without it
+    /// each input re-hashes the whole prevout, sequence and output lists. A
+    /// cache built for a *different* transaction is ignored, not trusted.
+    pub sighash_cache: Option<&'a SighashCache<'a>>,
     /// The limit table in force.
     pub limits: ScriptLimits,
 }
 
 impl<'a> ExecCtx<'a> {
     /// A context with consensus limits and everything else at its zero value.
+    ///
+    /// The coin's age is unknown in this context, so a relative locktime fails
+    /// closed until the caller supplies [`ExecCtx::input_height`] /
+    /// [`ExecCtx::input_mtp_s`].
     pub fn new(chain_id: ChainId, tx: &'a Transaction, input_index: usize) -> Self {
         ExecCtx {
             chain_id,
             tx,
             input_index,
             input_value: Amount::ZERO,
+            input_height: None,
+            input_mtp_s: None,
             block_height: 0,
             block_mtp_s: 0,
+            sighash_cache: None,
             limits: ScriptLimits::CONSENSUS,
         }
     }
@@ -107,6 +142,26 @@ struct Conditional {
     else_seen: bool,
 }
 
+/// Where the sighash mid-states come from.
+///
+/// The caller's per-transaction cache when it is genuinely for this
+/// transaction, otherwise one owned by this machine — which still collapses the
+/// many signature checks of a single input onto one set of digests.
+#[derive(Debug)]
+enum SighashSource<'a, 'c> {
+    Shared(&'c SighashCache<'a>),
+    Owned(SighashCache<'a>),
+}
+
+impl<'a> SighashSource<'a, '_> {
+    fn cache(&self) -> &SighashCache<'a> {
+        match self {
+            SighashSource::Shared(cache) => cache,
+            SighashSource::Owned(cache) => cache,
+        }
+    }
+}
+
 /// The interpreter state.
 pub(crate) struct Machine<'a, 'c> {
     pub(crate) ctx: &'c ExecCtx<'a>,
@@ -115,10 +170,17 @@ pub(crate) struct Machine<'a, 'c> {
     pub(crate) ops: u32,
     pub(crate) sig_checks: u32,
     pub(crate) max_stack: usize,
+    sighash: SighashSource<'a, 'c>,
 }
 
 impl<'a, 'c> Machine<'a, 'c> {
     fn new(ctx: &'c ExecCtx<'a>) -> Self {
+        // A cache the caller built for some other transaction is worse than no
+        // cache: it would sign the wrong bytes. Check identity, then fall back.
+        let sighash = match ctx.sighash_cache {
+            Some(cache) if cache.is_for(ctx.tx) => SighashSource::Shared(cache),
+            _ => SighashSource::Owned(SighashCache::new(ctx.tx)),
+        };
         Machine {
             ctx,
             stack: Vec::new(),
@@ -126,7 +188,13 @@ impl<'a, 'c> Machine<'a, 'c> {
             ops: 0,
             sig_checks: 0,
             max_stack: 0,
+            sighash,
         }
+    }
+
+    /// The sighash mid-states in force for this input.
+    pub(crate) fn sighash_cache(&self) -> &SighashCache<'a> {
+        self.sighash.cache()
     }
 
     fn stats(&self) -> ExecStats {
@@ -487,6 +555,151 @@ mod tests {
         assert_eq!(ctx.limits, ScriptLimits::CONSENSUS);
         assert_eq!(ctx.input_value, Amount::ZERO);
         assert_eq!(ctx.block_height, 0);
+    }
+
+    /// A 65-byte script signature and the 32-byte key it claims to be from.
+    ///
+    /// The signature does not have to *verify* — `check_signature` computes the
+    /// digest before it verifies, and a `false` result is a legal outcome — it
+    /// only has to be well formed enough to reach the digest.
+    fn sig_and_key() -> (Vec<u8>, Vec<u8>) {
+        let secret = ferrum_crypto::SecretKey::from_bytes(&[7u8; 32]).unwrap();
+        let mut sig = vec![0u8; 64];
+        sig.push(crate::sighash::SIGHASH_ALL);
+        (sig, secret.public_key().as_bytes().to_vec())
+    }
+
+    /// `<sig> <pk>` as a push-only `script_sig`.
+    fn push_pair(sig: &[u8], key: &[u8]) -> Script {
+        let mut out = Vec::new();
+        Instruction::push(sig).unwrap().encode_into(&mut out);
+        Instruction::push(key).unwrap().encode_into(&mut out);
+        Script::new(out)
+    }
+
+    /// `checks` repetitions of `OP_2DUP OP_CHECKSIG OP_DROP`: many signature
+    /// checks over one input, which is what a redeem script can legally do.
+    fn repeated_checksig(checks: usize) -> Script {
+        let mut out = Vec::new();
+        for _ in 0..checks {
+            out.push(Opcode::TwoDup.to_byte());
+            out.push(Opcode::CheckSig.to_byte());
+            out.push(Opcode::Drop.to_byte());
+        }
+        Script::new(out)
+    }
+
+    /// How many transaction-wide digests were computed while running `f`.
+    fn digests_computed(f: impl FnOnce()) -> usize {
+        let before = crate::sighash::DIGESTS_COMPUTED.with(std::cell::Cell::get);
+        f();
+        crate::sighash::DIGESTS_COMPUTED.with(std::cell::Cell::get) - before
+    }
+
+    #[test]
+    fn the_transaction_wide_digests_are_hashed_once_per_verify() {
+        // hash_prevouts, hash_sequences and hash_outputs depend on the
+        // transaction, not on the check. Recomputing them inside every
+        // signature check makes validation quadratic in transaction size, which
+        // is the denial of service the BIP-143 preimage shape exists to remove.
+        let (sig, key) = sig_and_key();
+        let t = tx();
+        let ctx =
+            ExecCtx { input_value: Amount::from_grains(1), ..ExecCtx::new(ChainId::DEVNET, &t, 0) };
+        let script_sig = push_pair(&sig, &key);
+        let script_pubkey = repeated_checksig(20);
+
+        let mut stats = None;
+        let digests = digests_computed(|| {
+            stats = verify(&script_sig, &script_pubkey, &ctx).err().map(|_| ());
+            // The script leaves two elements, so it fails the clean-stack rule;
+            // the twenty signature checks still happened.
+        });
+        assert!(stats.is_some(), "the script is expected to end with a dirty stack");
+        assert_eq!(digests, 3, "one prevouts, one sequences, one outputs — not three per check");
+    }
+
+    #[test]
+    fn one_cache_serves_every_input_of_a_transaction() {
+        // The other half of the quadratic: one signature check per input, but
+        // every input re-hashing the whole transaction.
+        let (sig, key) = sig_and_key();
+        let mut t = tx();
+        for i in 1..4u8 {
+            t.inputs.push(TxIn {
+                prev_out: OutPoint::new(ferrum_types::Txid::from_bytes([i; 32]), u32::from(i)),
+                script_sig: Script::EMPTY,
+                sequence: 0xffff_fffe,
+            });
+        }
+        let cache = SighashCache::new(&t);
+        let script_sig = push_pair(&sig, &key);
+        let script_pubkey = repeated_checksig(1);
+
+        let digests = digests_computed(|| {
+            for input_index in 0..t.inputs.len() {
+                let ctx = ExecCtx {
+                    input_value: Amount::from_grains(1),
+                    sighash_cache: Some(&cache),
+                    ..ExecCtx::new(ChainId::DEVNET, &t, input_index)
+                };
+                let _ = verify(&script_sig, &script_pubkey, &ctx);
+            }
+        });
+        assert_eq!(digests, 3, "four inputs must share one set of mid-states");
+    }
+
+    #[test]
+    fn a_cache_built_for_another_transaction_is_ignored() {
+        // A mismatched cache would sign the wrong bytes, which is far worse
+        // than recomputing. The machine checks identity and falls back.
+        let mine = tx();
+        let mut other = tx();
+        other.lock_time = 99;
+        let wrong = SighashCache::new(&other);
+
+        let script_code = repeated_checksig(1);
+        let with_wrong_cache = ExecCtx {
+            input_value: Amount::from_grains(1),
+            sighash_cache: Some(&wrong),
+            ..ExecCtx::new(ChainId::DEVNET, &mine, 0)
+        };
+        let machine = Machine::new(&with_wrong_cache);
+        assert!(machine.sighash_cache().is_for(&mine), "the wrong cache must not be adopted");
+
+        // And the digest the VM would use is the one for `mine`.
+        let expected = crate::sighash::signature_hash(
+            &mine,
+            0,
+            script_code.as_bytes(),
+            Amount::from_grains(1),
+            ChainId::DEVNET,
+            crate::sighash::SigHashType::ALL,
+        )
+        .unwrap();
+        let used = machine
+            .sighash_cache()
+            .signature_hash(
+                0,
+                script_code.as_bytes(),
+                Amount::from_grains(1),
+                ChainId::DEVNET,
+                crate::sighash::SigHashType::ALL,
+            )
+            .unwrap();
+        assert_eq!(used, expected);
+        assert_ne!(
+            used,
+            wrong
+                .signature_hash(
+                    0,
+                    script_code.as_bytes(),
+                    Amount::from_grains(1),
+                    ChainId::DEVNET,
+                    crate::sighash::SigHashType::ALL,
+                )
+                .unwrap()
+        );
     }
 
     #[test]

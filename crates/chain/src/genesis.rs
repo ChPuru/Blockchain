@@ -67,6 +67,23 @@ pub fn genesis_message(params: &ChainParams) -> String {
 /// every parameter two nodes must agree on. Written out field by field rather
 /// than derived, so that adding a field to [`ChainParams`] that does not belong
 /// in consensus cannot silently change every network's genesis hash.
+///
+/// # The fork schedule is part of it
+///
+/// `bft_activation_height` and `bft_validators` decide *which engine validates
+/// every block* at and above the activation height, and the validator order is
+/// itself consensus (the proposer rotation and every commit signature index are
+/// positional). They are loaded per node from `--consensus-config`, so they are
+/// exactly the values that can differ between two nodes that believe they are
+/// on the same network — and a difference is not discovered until the fork
+/// height, by which time both branches are permanent. Committing to them here
+/// turns that into a startup-time genesis mismatch, which is the whole point of
+/// this function.
+///
+/// The activation is encoded as a **presence byte then the height**, not as a
+/// sentinel: `None` and `Some(u64::MAX)` are different schedules and must not
+/// hash alike. The validator list is length-prefixed and then written in index
+/// order, so reordering it, truncating it or extending it all move the hash.
 #[must_use]
 pub fn genesis_commitment(params: &ChainParams) -> Hash32 {
     let mut buf: Vec<u8> = Vec::with_capacity(128);
@@ -84,6 +101,22 @@ pub fn genesis_commitment(params: &ChainParams) -> Hash32 {
     buf.extend_from_slice(&params.genesis_timestamp_ms.to_le_bytes());
     buf.extend_from_slice(&params.genesis_bits.to_u32().to_le_bytes());
     buf.extend_from_slice(&params.genesis_nonce.to_le_bytes());
+    // The fork schedule: presence byte, height, then the validator set in index
+    // order behind its own length.
+    match params.bft_activation_height {
+        Some(height) => {
+            buf.push(1);
+            buf.extend_from_slice(&height.to_le_bytes());
+        }
+        None => {
+            buf.push(0);
+            buf.extend_from_slice(&0u64.to_le_bytes());
+        }
+    }
+    buf.extend_from_slice(&u64::try_from(params.bft_validators.len()).unwrap_or(u64::MAX).to_le_bytes());
+    for validator in &params.bft_validators {
+        buf.extend_from_slice(validator.as_bytes());
+    }
     tagged_hash(TAG_GENESIS, &buf)
 }
 

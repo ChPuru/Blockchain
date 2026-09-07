@@ -15,23 +15,30 @@
 //! operations, no loops — are what make this tractable: execution is statically
 //! bounded, so there is no need for gas metering and no way to build an
 //! unbounded loop out of valid opcodes.
+//!
+//! The execution context is fuzzed too, in the narrow places where a script can
+//! observe it: the block height and median time past that `OP_CHECKLOCKTIMEVERIFY`
+//! reads, and the spent coin's height and median time past that
+//! `OP_CHECKSEQUENCEVERIFY` measures a BIP-68 relative locktime against. Those
+//! are `u64` arithmetic on attacker-influenced values, so they belong in the
+//! fuzzed surface rather than pinned to one constant.
 
 #![no_main]
 
-use ferrum_script::{ExecCtx, Script, ScriptLimits};
-use ferrum_types::{Amount, ChainId, OutPoint, Transaction, TxIn, TxOut};
+use ferrum_script::{ExecCtx, ScriptLimits, SighashCache};
+use ferrum_types::{Amount, ChainId, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
 use libfuzzer_sys::fuzz_target;
 
 /// A fixed, valid transaction to hang the execution context on. The transaction
 /// is not what is being fuzzed — the scripts are — so keeping it constant makes
 /// crashes reproduce from the script bytes alone.
-fn fixture_tx(script_sig: Script) -> Transaction {
+fn fixture_tx(script_sig: Script, sequence: u32) -> Transaction {
     Transaction {
         version: 1,
         inputs: vec![TxIn {
-            prev_out: OutPoint { txid: Default::default(), vout: 0 },
+            prev_out: OutPoint { txid: Txid::ZERO, vout: 0 },
             script_sig,
-            sequence: 0xffff_fffe,
+            sequence,
         }],
         outputs: vec![TxOut {
             value: Amount::from_grains(50_000),
@@ -39,6 +46,15 @@ fn fixture_tx(script_sig: Script) -> Transaction {
         }],
         lock_time: 0,
     }
+}
+
+/// Four bytes of the input, little-endian, or zero when they are not there.
+fn u32_at(data: &[u8], offset: usize) -> u32 {
+    let mut buf = [0u8; 4];
+    for (i, slot) in buf.iter_mut().enumerate() {
+        *slot = data.get(offset.wrapping_add(i)).copied().unwrap_or(0);
+    }
+    u32::from_le_bytes(buf)
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -62,14 +78,27 @@ fuzz_target!(|data: &[u8]| {
     let _ = ferrum_script::is_push_only(&script_sig);
     let _ = ferrum_script::templates::classify(&script_pubkey);
 
-    let tx = fixture_tx(script_sig.clone());
+    // The context a timelock opcode can see, taken from the input: the coin's
+    // age drives every branch of the BIP-68 comparison, including the ones that
+    // add a 16-bit relative lock to a `u64` near its maximum.
+    let sequence = u32_at(data, 0);
+    let block_height = u64::from(u32_at(data, 4));
+    let coin_height = u64::from(u32_at(data, 8));
+    let block_mtp_s = u64::from(u32_at(data, 12));
+    let coin_mtp_s = u64::from(u32_at(data, 16));
+
+    let tx = fixture_tx(script_sig.clone(), sequence);
+    let cache = SighashCache::new(&tx);
     let ctx = ExecCtx {
         chain_id: ChainId(3),
         tx: &tx,
         input_index: 0,
         input_value: Amount::from_grains(100_000),
-        block_height: 1_000,
-        block_mtp_s: 1_700_000_000,
+        input_height: Some(coin_height),
+        input_mtp_s: Some(coin_mtp_s),
+        block_height,
+        block_mtp_s,
+        sighash_cache: Some(&cache),
         limits: ScriptLimits::default(),
     };
 
@@ -80,4 +109,12 @@ fuzz_target!(|data: &[u8]| {
 
     // Standalone evaluation, as exposed by `chain-cli script eval`.
     let _ = ferrum_script::eval(&script_pubkey, Vec::new(), &ctx);
+
+    // The same scripts against a context that cannot say how old the coin is:
+    // a different set of branches through the relative-locktime rules, and the
+    // shape every non-validating caller (the CLI, a wallet self-check) uses.
+    let bare =
+        ExecCtx { input_value: Amount::from_grains(100_000), ..ExecCtx::new(ChainId(3), &tx, 0) };
+    let _ = ferrum_script::verify(&script_sig, &script_pubkey, &bare);
+    let _ = ferrum_script::eval(&script_pubkey, Vec::new(), &bare);
 });

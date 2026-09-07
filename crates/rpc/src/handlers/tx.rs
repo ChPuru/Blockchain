@@ -53,7 +53,8 @@ pub fn get_raw_transaction(
     if !chain.index_enabled() {
         return Err(RpcError::index_disabled("looking a transaction up by id"));
     }
-    let found = lookup::find_transaction(chain, txid)?
+    let mut reader = lookup::BlockReader::new(chain);
+    let found = lookup::find_transaction(&mut reader, txid)?
         .ok_or_else(|| RpcError::not_found(format!("no transaction {}", txid.to_hex())))?;
     let (_, tip_height) = chain.tip()?;
     let active = lookup::on_active_chain(chain, &found.block_hash, found.height)?;

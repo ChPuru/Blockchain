@@ -150,6 +150,16 @@ impl OrphanPool {
     /// last of them arrives: releasing it early would re-run the whole
     /// acceptance path only to put it straight back.
     pub fn take_children_of(&mut self, parent: &Txid) -> Vec<Transaction> {
+        self.take_child_entries_of(parent).into_iter().map(|e| e.tx).collect()
+    }
+
+    /// [`Self::take_children_of`], keeping each entry's arrival stamp.
+    ///
+    /// A released child can still fail re-evaluation and land back here — its
+    /// parent may have been evicted again in the meantime — and the caller
+    /// needs the original `added_height`/`seq` to hand to
+    /// [`Self::restore_age`], or the round trip silently renews the orphan.
+    pub fn take_child_entries_of(&mut self, parent: &Txid) -> Vec<OrphanEntry> {
         let Some(children) = self.by_parent.remove(parent) else {
             return Vec::new();
         };
@@ -166,7 +176,7 @@ impl OrphanPool {
                 continue;
             }
             if let Some(entry) = self.take(&child) {
-                ready.push(entry.tx);
+                ready.push(entry);
             }
         }
         ready
@@ -210,6 +220,31 @@ impl OrphanPool {
     /// Remove `id`, reporting whether it was held.
     pub fn remove(&mut self, id: &Txid) -> bool {
         self.take(id).is_some()
+    }
+
+    /// Put an entry's age back where it was.
+    ///
+    /// [`crate::Mempool::promote_orphans`] re-offers every waiting orphan to
+    /// the acceptance path on every block, and one whose parents are still
+    /// missing lands back here through [`Self::insert`] — which stamps it with
+    /// the *current* tip height. Left alone, that resets the expiry clock on
+    /// every block and [`Self::expire`] can never fire: the node renews the
+    /// orphan itself, which is exactly what [`Self::insert`]'s own contract
+    /// says a peer must not be able to do. Restoring the original
+    /// `added_height` and `seq` keeps both the expiry clock and the eviction
+    /// queue where the first arrival put them.
+    ///
+    /// Does nothing when `id` is not held. Returns whether it was.
+    pub fn restore_age(&mut self, id: &Txid, added_height: u64, seq: u64) -> bool {
+        let Some(entry) = self.by_txid.get_mut(id) else {
+            return false;
+        };
+        let previous = entry.seq;
+        entry.added_height = added_height;
+        entry.seq = seq;
+        self.by_seq.remove(&previous);
+        self.by_seq.insert(seq, *id);
+        true
     }
 
     /// Drop everything that arrived more than `expiry_blocks` ago.

@@ -19,11 +19,13 @@
 use std::collections::BTreeMap;
 
 use ferrum_chain::{BlockCtx, build_coinbase_script_sig};
-use ferrum_consensus::{ConsensusEngine, PowEngine, Target, compact_to_target, hash_meets_target};
+use ferrum_consensus::{
+    BftCommit, ConsensusEngine, PowEngine, Target, compact_to_target, hash_meets_target,
+};
 use ferrum_storage::{MapView, header_hash, txid};
 use ferrum_types::{
     Amount, Block, BlockHash, BlockHeader, BlockSeal, ChainParams, Coin, CompactTarget, Hash32,
-    OutPoint, Script, Transaction, TxIn, TxOut, Txid,
+    OutPoint, Script, Transaction, TxIn, TxOut, Txid, ValidatorId,
 };
 
 use crate::error::SimError;
@@ -63,6 +65,34 @@ pub fn sim_params() -> ChainParams {
     params.pow_limit = limit;
     params.genesis_bits = CompactTarget(0x207f_ffff);
     params
+}
+
+/// How many validators a BFT simulation configures.
+///
+/// Four is the smallest set SPEC §9.2 admits: `f = (n-1)/3 = 1`, quorum
+/// `2f+1 = 3`, and `2*3 > 4`, so quorum intersection holds.
+pub const SIM_BFT_VALIDATORS: usize = 4;
+
+/// [`sim_params`] with the BFT engine activated at `activation`.
+///
+/// The validator ids are the first [`SIM_BFT_VALIDATORS`] keys of the
+/// deterministic keyring, so a fixture that ever needs to *sign* a certificate
+/// already has the secrets. [`ferrum_chain::apply_block`] itself never reads
+/// them: at the determinism seam a seal is checked for its engine byte and
+/// nothing else, because counting `2f+1` signatures needs the validator set
+/// the chain manager holds (SPEC §3.2 rule 11, CONTRACT §8.1 rule 6).
+///
+/// # Errors
+///
+/// [`SimError::Fixture`] if the deterministic keyring cannot be derived.
+pub fn sim_bft_params(activation: u64) -> Result<ChainParams, SimError> {
+    let keys = KeyRing::deterministic(DEFAULT_KEYRING_SIZE)?;
+    let mut params = sim_params();
+    params.bft_activation_height = Some(activation);
+    params.bft_validators = (0..SIM_BFT_VALIDATORS)
+        .map(|i| keys.public(i).map(|k| ValidatorId::from_bytes(*k.as_bytes())))
+        .collect::<Result<Vec<_>, SimError>>()?;
+    Ok(params)
 }
 
 mod plan;
@@ -123,6 +153,20 @@ impl ChainBuilder {
     /// As [`ChainBuilder::new`].
     pub fn devnet(seed: u64) -> Result<Self, SimError> {
         Self::new(sim_params(), seed)
+    }
+
+    /// A devnet chain that switches to the BFT engine at `activation`.
+    ///
+    /// Blocks below `activation` are ground against the PoW target exactly as
+    /// [`ChainBuilder::devnet`] builds them; at and above it they carry a BFT
+    /// seal, freeze `bits` at the parent's value and leave the nonce at zero,
+    /// which is what [`ferrum_consensus::BftEngine`] requires of a header.
+    ///
+    /// # Errors
+    ///
+    /// As [`ChainBuilder::new`], plus [`sim_bft_params`].
+    pub fn devnet_bft(seed: u64, activation: u64) -> Result<Self, SimError> {
+        Self::new(sim_bft_params(activation)?, seed)
     }
 
     // ---- accessors ----------------------------------------------------
@@ -414,9 +458,14 @@ impl ChainBuilder {
     pub fn build_block(&mut self, plan: &BlockPlan) -> Result<Block, SimError> {
         let parent = self.tip_header()?;
         let height = plan.height.unwrap_or_else(|| self.height().saturating_add(1));
+        let engine_id = self.params.engine_at(self.height().saturating_add(1));
         let prev_hash = plan.prev_hash.unwrap_or_else(|| header_hash(&parent));
         let bits = match plan.bits {
             Some(b) => b,
+            // Under BFT there is no difficulty: `BftEngine::next_bits` returns
+            // the parent's own value, so ASERT must not be consulted here or
+            // the header would fail rule 7 at every BFT height.
+            None if engine_id == BlockSeal::ENGINE_BFT => parent.bits,
             None => self.next_bits()?,
         };
         let timestamp_ms = plan
@@ -454,10 +503,32 @@ impl ChainBuilder {
             bits,
             nonce: 0,
         };
-        if plan.grind {
+        // Nothing grinds a nonce under BFT — the certificate is the proof, and
+        // `BftEngine::validate_header` rejects a non-zero nonce outright.
+        if plan.grind && engine_id == BlockSeal::ENGINE_POW {
             self.grind(&mut header)?;
         }
-        Ok(Block::new(header, txs, plan.seal.clone().unwrap_or(BlockSeal::POW)))
+        let seal = match plan.seal.clone() {
+            Some(seal) => seal,
+            None => Self::default_seal(engine_id, height, &header),
+        };
+        Ok(Block::new(header, txs, seal))
+    }
+
+    /// The seal an honest block at this height carries.
+    ///
+    /// Under BFT that is a `BftCommit` over the block's own hash. It carries
+    /// **no signatures**: the simulator has no round machine, and the seam
+    /// cannot tell the difference — `apply_block` checks the engine byte and
+    /// leaves the `2f+1` count to `ConsensusEngine::validate_seal`, which needs
+    /// the validator set (SPEC §3.2 rule 11). A fixture that wants a real
+    /// certificate supplies its own seal through [`BlockPlan::seal`].
+    fn default_seal(engine_id: u8, height: u64, header: &BlockHeader) -> BlockSeal {
+        if engine_id == BlockSeal::ENGINE_BFT {
+            BftCommit::new(height, 0, header_hash(header), Vec::new()).to_seal()
+        } else {
+            BlockSeal::POW
+        }
     }
 
     /// Find a nonce whose header hash meets the header's own target.

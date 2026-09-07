@@ -5,16 +5,31 @@
 //! `spawn_blocking`?" question answerable by looking at the *caller* rather
 //! than by auditing the whole crate. The only callers are inside
 //! [`crate::context::blocking`].
+//!
+//! # `submitblock` is a block-entry path like any other
+//!
+//! SPEC §3.2 rule 10 — `timestamp_ms <= now + max_future_block_time_ms` — is
+//! the one validation rule that reads a clock, which is why it lives above the
+//! `apply_block` seam rather than inside it. The node applies it in
+//! `Relay::accept_block`, so gossip, sync and the miner all get it. An RPC
+//! submission does not go through `Relay`, and a consensus rule that one entry
+//! point enforces and another does not is a split waiting to happen: the block
+//! this node accepts is the block every peer rejects, and the miner then builds
+//! on a tip nobody will follow. So [`ChainHandle`] carries a clock and checks
+//! the same rule here, with the same consequence `Relay` gives it — refused,
+//! and **not** recorded invalid, because our clock is what made it
+//! unacceptable and in an hour it may be fine.
 
 use std::sync::Arc;
 
 use ferrum_chain::{AcceptOutcome, ChainManager};
-use ferrum_consensus::{BlockTemplate, Work};
+use ferrum_consensus::{BlockTemplate, Work, check_future_time};
 use ferrum_storage::{BlockIndexEntry, Store, TxLocation};
 use ferrum_types::{
     Block, BlockHash, ChainParams, Coin, Hash32, OutPoint, Script, Transaction, Txid,
 };
 
+use crate::context::{Clock, SystemClock};
 use crate::error::{RpcError, RpcErrorCode};
 use crate::provider::{ChainProvider, SubmitOutcome};
 
@@ -24,18 +39,35 @@ pub struct ChainHandle {
     chain: Arc<ChainManager>,
     store: Arc<Store>,
     index_enabled: bool,
+    clock: Arc<dyn Clock>,
 }
 
 impl ChainHandle {
-    /// Wrap a running chain.
+    /// Wrap a running chain, on the system clock.
     ///
     /// `index_enabled` mirrors `StoreConfig::index_transactions`; the store
     /// does not publish it, and answering "why is `getbalance` failing?" with
     /// a clear code beats letting the query fail deeper down.
     #[must_use]
     pub fn new(chain: Arc<ChainManager>, index_enabled: bool) -> Self {
+        Self::with_clock(chain, index_enabled, Arc::new(SystemClock))
+    }
+
+    /// [`ChainHandle::new`] on an injected clock.
+    ///
+    /// The clock is only read by [`ChainProvider::submit_block`], for the
+    /// future-time rule described in the module docs. Injecting it is what lets
+    /// a test pin "now" and show that the *same block* is refused by one clock
+    /// and accepted by another — which is also the proof that a refusal here
+    /// records nothing.
+    #[must_use]
+    pub fn with_clock(
+        chain: Arc<ChainManager>,
+        index_enabled: bool,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         let store = Arc::clone(chain.store());
-        ChainHandle { chain, store, index_enabled }
+        ChainHandle { chain, store, index_enabled, clock }
     }
 
     /// The chain manager underneath, for callers that need more than the trait.
@@ -155,6 +187,19 @@ impl ChainProvider for ChainHandle {
 
     fn submit_block(&self, block: Block) -> Result<SubmitOutcome, RpcError> {
         let hash = ferrum_storage::header_hash(&block.header);
+        // SPEC §3.2 rule 10, applied before anything reaches the seam. See the
+        // module docs: this is the only block-entry path that does not go
+        // through `Relay`, and the rule has to hold on all of them.
+        check_future_time(&block.header, self.clock.now_ms(), self.chain.params()).map_err(
+            |e| {
+                tracing::warn!(
+                    %hash,
+                    timestamp_ms = block.header.timestamp_ms,
+                    "submitted block is too far in the future; refused without recording it invalid"
+                );
+                RpcError::from(e)
+            },
+        )?;
         let outcome = self.chain.accept_block(block)?;
         // Orphans that were waiting on this block are now connectable. Doing
         // it here rather than in `ChainManager::accept_block` keeps the

@@ -41,8 +41,9 @@ use crate::error::StorageError;
 use crate::index;
 use crate::tables::{
     ADDR_INDEX, BLOCKS, BlockIndexEntry, HEADERS, HEIGHT, META, META_CHAIN_ID, META_ENGINE,
-    META_SCHEMA_VERSION, META_TIP, SCHEMA_VERSION, TX_INDEX, UNDO, UTXO, decode_tip, decode_u32,
-    encode_tip, hash_key, height_key, outpoint_key, txid,
+    META_INDEX_HEIGHT, META_SCHEMA_VERSION, META_TIP, SCHEMA_VERSION, TX_INDEX, UNDO, UTXO,
+    decode_tip, decode_u32, decode_u64, encode_tip, hash_from_key, hash_key, height_key,
+    outpoint_key, txid,
 };
 use crate::undo::UndoBlock;
 use crate::view::{StateDiff, StateView};
@@ -93,6 +94,13 @@ impl StoreConfig {
 pub struct Store {
     db: Database,
     cfg: StoreConfig,
+    /// Armed by [`Store::connect_block_then_crash`]: the next
+    /// [`Store::connect_block`] performs every write and then drops its
+    /// transaction instead of committing. The crash-consistency suite drives
+    /// the real function through this hook rather than a copy of it, so a
+    /// change to the write sequence is a change to what the suite crashes.
+    #[cfg(test)]
+    crash_before_commit: std::sync::atomic::AtomicBool,
 }
 
 impl Store {
@@ -176,7 +184,101 @@ impl Store {
             }
         }
         txn.commit()?;
-        Ok(Store { db, cfg })
+        let store = Store {
+            db,
+            cfg,
+            #[cfg(test)]
+            crash_before_commit: std::sync::atomic::AtomicBool::new(false),
+        };
+        store.reconcile_index()?;
+        Ok(store)
+    }
+
+    /// Bring `meta.index_height` and the reverse index into agreement with
+    /// what is on disk, when this store is opened with the index on.
+    ///
+    /// # Why this repairs rather than refuses
+    ///
+    /// `index_transactions` is a command-line flag, so the same datadir can be
+    /// written by a run that maintained `tx_index`/`addr_index` and by a run
+    /// that did not; the tables are then stale in ways no reader can detect.
+    /// Refusing to open would be the [`StorageError::SchemaMismatch`] shape,
+    /// but the cure for a stale index is `chain reindex`, and *that* command
+    /// opens this same store with the index on — a store that refused to open
+    /// could never be repaired.
+    ///
+    /// So an index that does not describe the tip is cleared instead: both
+    /// tables are dropped, the genesis block is re-indexed so a replay has a
+    /// contiguous base to build on, and `meta.index_height` is set to `0` (or
+    /// removed on an empty store). Until a replay carries it back up to the
+    /// tip, every index read fails with [`StorageError::IndexIncomplete`]
+    /// rather than answering from rows that describe a chain that no longer
+    /// exists. Clearing is safe: the index is not consensus state, and it is
+    /// rebuilt from the block bodies that are still there.
+    fn reconcile_index(&self) -> Result<(), StorageError> {
+        if !self.cfg.index_transactions {
+            // A store opened without the index never reads from it, and its
+            // first write clears the recorded height. Nothing to do here.
+            return Ok(());
+        }
+        let tip = self.tip()?;
+        let recorded = self.index_height()?;
+        match (tip, recorded) {
+            (None, None) => return Ok(()),
+            (Some((_, height)), Some(indexed_to)) if indexed_to == height => return Ok(()),
+            _ => {}
+        }
+
+        let txn = self.db.begin_write()?;
+        txn.delete_table(TX_INDEX)?;
+        txn.delete_table(ADDR_INDEX)?;
+        {
+            // Recreate them empty: a read transaction against a table that has
+            // never been written fails with `TableDoesNotExist`.
+            let _ = txn.open_table(TX_INDEX)?;
+            let _ = txn.open_table(ADDR_INDEX)?;
+        }
+        let mut rebuilt_to = None;
+        if tip.is_some() {
+            let genesis = {
+                let heights = txn.open_table(HEIGHT)?;
+                heights.get(&height_key(0))?.map(|g| hash_from_key(g.value())).transpose()?
+            };
+            if let Some(hash) = genesis {
+                let block: Option<Block> = {
+                    let blocks = txn.open_table(BLOCKS)?;
+                    decode_opt("block", blocks.get(&hash_key(&hash))?.map(|g| g.value().to_vec()))?
+                };
+                if let Some(block) = block {
+                    let undo: Option<UndoBlock> = {
+                        let undos = txn.open_table(UNDO)?;
+                        decode_opt(
+                            "undo",
+                            undos.get(&hash_key(&hash))?.map(|g| g.value().to_vec()),
+                        )?
+                    };
+                    // Genesis spends nothing, but the undo record is what a
+                    // connect indexed from, so index from it here too.
+                    let spent: BTreeMap<OutPoint, Coin> = undo
+                        .map(|u| u.spent.iter().map(|c| (c.out_point, c.coin.clone())).collect())
+                        .unwrap_or_default();
+                    index::index_block(&txn, &hash, 0, &block, &spent)?;
+                    rebuilt_to = Some(0);
+                }
+            }
+        }
+        {
+            let mut meta = txn.open_table(META)?;
+            set_index_height(&mut meta, rebuilt_to)?;
+        }
+        txn.commit()?;
+
+        tracing::warn!(
+            indexed_to = ?recorded,
+            tip_height = ?tip.map(|(_, h)| h),
+            "the index does not describe the tip; cleared - run `chain reindex` to rebuild"
+        );
+        Ok(())
     }
 
     /// The configuration this store was opened with.
@@ -185,7 +287,12 @@ impl Store {
         &self.cfg
     }
 
-    /// Whether the reverse index is maintained.
+    /// Whether the reverse index is *maintained* by this handle.
+    ///
+    /// Maintained is not the same as current: a store whose tables were
+    /// written by an earlier run with a different `--index` setting still
+    /// maintains them from now on, but cannot be read from until a replay
+    /// carries [`Store::index_height`] back up to the tip.
     #[must_use]
     pub fn is_indexed(&self) -> bool {
         self.cfg.index_transactions
@@ -340,8 +447,19 @@ impl Store {
         // Tip last, inside this same transaction. Nothing below this line.
         {
             let mut meta = txn.open_table(META)?;
+            index_height_on_connect(&mut meta, self.cfg.index_transactions, height)?;
             meta.insert(META_ENGINE, [entry.seal_engine].as_slice())?;
             meta.insert(META_TIP, encode_tip(h, height).as_slice())?;
+        }
+
+        // The crash-consistency suite's injection point: every write above has
+        // happened, and the transaction is dropped instead of committed. It
+        // sits here, in the real function, so the suite crashes the production
+        // write sequence rather than a copy that can drift from it.
+        #[cfg(test)]
+        if self.crash_before_commit.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            drop(txn);
+            return Ok(());
         }
         txn.commit()?;
 
@@ -427,6 +545,7 @@ impl Store {
         // Tip last, inside this same transaction. Nothing below this line.
         {
             let mut meta = txn.open_table(META)?;
+            index_height_on_disconnect(&mut meta, self.cfg.index_transactions, parent_height)?;
             if let Some(engine) = parent_engine {
                 meta.insert(META_ENGINE, [engine].as_slice())?;
             }
@@ -456,12 +575,15 @@ impl Store {
         if self.cfg.index_transactions { Ok(()) } else { Err(StorageError::IndexDisabled) }
     }
 
-    /// Every write [`Store::connect_block`] performs, followed by dropping the
-    /// transaction **without committing** — a crash between the first write and
-    /// the commit.
+    /// Run [`Store::connect_block`] and drop its transaction **without
+    /// committing** - a crash between the first write and the commit.
     ///
-    /// Exists so the crash-consistency suite can prove that a half-written
-    /// block leaves no trace, rather than assuming redb's atomicity.
+    /// This arms a hook inside `connect_block` itself rather than
+    /// re-implementing its writes. A hand-copied twin proves only that redb
+    /// rolls back *the twin*: the copy this replaces had already drifted, and
+    /// wrote neither the transaction index nor `meta.engine`, so the suite
+    /// could not have noticed if `connect_block` had started committing in two
+    /// transactions.
     #[cfg(test)]
     pub(crate) fn connect_block_then_crash(
         &self,
@@ -471,33 +593,12 @@ impl Store {
         diff: &StateDiff,
         block: &Block,
     ) -> Result<(), StorageError> {
-        let block_bytes = borsh::to_vec(block).map_err(|e| StorageError::corrupt("block", e))?;
-        let entry_bytes = borsh::to_vec(entry).map_err(|e| StorageError::corrupt("header", e))?;
-        let undo_bytes =
-            borsh::to_vec(&diff.undo_block()).map_err(|e| StorageError::corrupt("undo", e))?;
-        let txn = self.db.begin_write()?;
-        {
-            let mut blocks = txn.open_table(BLOCKS)?;
-            blocks.insert(&hash_key(h), block_bytes.as_slice())?;
-            let mut headers = txn.open_table(HEADERS)?;
-            headers.insert(&hash_key(h), entry_bytes.as_slice())?;
-            let mut undo_table = txn.open_table(UNDO)?;
-            undo_table.insert(&hash_key(h), undo_bytes.as_slice())?;
-            let mut heights = txn.open_table(HEIGHT)?;
-            heights.insert(&height_key(height), &hash_key(h))?;
-            let mut utxo = txn.open_table(UTXO)?;
-            for (op, coin) in &diff.created {
-                let bytes = borsh::to_vec(coin).map_err(|e| StorageError::corrupt("coin", e))?;
-                utxo.insert(&outpoint_key(op), bytes.as_slice())?;
-            }
-            for (op, _) in &diff.spent {
-                utxo.remove(&outpoint_key(op))?;
-            }
-            let mut meta = txn.open_table(META)?;
-            meta.insert(META_TIP, encode_tip(h, height).as_slice())?;
-        }
-        drop(txn); // the crash: no commit
-        Ok(())
+        self.crash_before_commit.store(true, std::sync::atomic::Ordering::SeqCst);
+        let outcome = self.connect_block(h, height, entry, diff, block);
+        // Disarm even if the call failed before reaching the hook, so a later
+        // connect on the same store is not silently swallowed.
+        self.crash_before_commit.store(false, std::sync::atomic::Ordering::SeqCst);
+        outcome
     }
 }
 
@@ -530,6 +631,92 @@ fn created_outpoints(block: &Block) -> Result<Vec<OutPoint>, StorageError> {
 /// Index the spent coins of a diff by outpoint, for the address indexer.
 fn spent_map(spent: &[(OutPoint, Coin)]) -> BTreeMap<OutPoint, Coin> {
     spent.iter().map(|(op, coin)| (*op, coin.clone())).collect()
+}
+
+/// Write (or clear) `meta.index_height`.
+fn set_index_height(
+    meta: &mut redb::Table<'_, &'static str, &'static [u8]>,
+    value: Option<u64>,
+) -> Result<(), StorageError> {
+    match value {
+        Some(height) => {
+            meta.insert(META_INDEX_HEIGHT, height.to_be_bytes().as_slice())?;
+        }
+        None => {
+            meta.remove(META_INDEX_HEIGHT)?;
+        }
+    }
+    Ok(())
+}
+
+/// Read `meta.index_height` from either kind of transaction.
+///
+/// # Errors
+/// [`StorageError::BadLength`] if the stored value is not eight bytes.
+pub(crate) fn read_index_height<T>(table: &T) -> Result<Option<u64>, StorageError>
+where
+    T: ReadableTable<&'static str, &'static [u8]>,
+{
+    match get_bytes(table, META_INDEX_HEIGHT)? {
+        Some(raw) => Ok(Some(decode_u64("meta.index_height", &raw)?)),
+        None => Ok(None),
+    }
+}
+
+/// Move `meta.index_height` in step with a connect at `height`.
+///
+/// A block written *without* index maintenance voids the record outright:
+/// after it the tables describe neither this chain nor any other, and the only
+/// honest answer to "how far does the index reach" is "unknown". A block
+/// written *with* it advances the record only when it extends what the index
+/// already covers; a connect on top of a gap leaves the record where it is, so
+/// the reader's `index_height == tip_height` test stays false until a replay
+/// closes the gap.
+fn index_height_on_connect(
+    meta: &mut redb::Table<'_, &'static str, &'static [u8]>,
+    indexed: bool,
+    height: u64,
+) -> Result<(), StorageError> {
+    let current = read_index_height(meta)?;
+    if !indexed {
+        if current.is_some() {
+            set_index_height(meta, None)?;
+        }
+        return Ok(());
+    }
+    let contiguous = match current {
+        None => height == 0,
+        Some(covered) => covered.checked_add(1) == Some(height),
+    };
+    if contiguous {
+        set_index_height(meta, Some(height))?;
+    }
+    Ok(())
+}
+
+/// Move `meta.index_height` in step with a disconnect down to `parent_height`.
+///
+/// The mirror of [`index_height_on_connect`]: an unindexed disconnect voids the
+/// record, and an indexed one drops it to the new tip when it was above it -
+/// `unindex_block` has just removed exactly the rows the connect wrote.
+fn index_height_on_disconnect(
+    meta: &mut redb::Table<'_, &'static str, &'static [u8]>,
+    indexed: bool,
+    parent_height: u64,
+) -> Result<(), StorageError> {
+    let current = read_index_height(meta)?;
+    if !indexed {
+        if current.is_some() {
+            set_index_height(meta, None)?;
+        }
+        return Ok(());
+    }
+    if let Some(covered) = current
+        && covered > parent_height
+    {
+        set_index_height(meta, Some(parent_height))?;
+    }
+    Ok(())
 }
 
 /// Read a `meta` value as owned bytes, from either kind of transaction.

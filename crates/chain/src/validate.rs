@@ -24,7 +24,8 @@ use ferrum_script::{
 };
 use ferrum_storage::txid;
 use ferrum_types::{
-    Amount, Block, BlockHeader, ChainParams, Hash32, LOCKTIME_THRESHOLD, Script, Transaction, Txid,
+    Amount, Block, BlockHeader, BlockSeal, ChainParams, Hash32, LOCKTIME_THRESHOLD, Script,
+    Transaction, Txid,
 };
 
 use crate::error::ValidationError;
@@ -87,6 +88,15 @@ pub fn median_time_past(headers: &[BlockHeader]) -> u64 {
 
 /// SPEC §4.1 — transaction sanity, needing nothing but the transaction.
 ///
+/// The bullets are applied in the order the specification lists them:
+/// non-empty inputs and outputs; output values in range; the output sum;
+/// no duplicate `OutPoint` among the inputs; script sizes; and finally the
+/// coinbase shape, or for a non-coinbase, that no input names
+/// [`OutPoint::NULL`]. That order is observable whenever a transaction breaks
+/// two of the rules at once (SPEC §3.4).
+///
+/// [`OutPoint::NULL`]: ferrum_types::OutPoint::NULL
+///
 /// # Errors
 ///
 /// One variant per rule; see [`ValidationError`].
@@ -114,23 +124,36 @@ pub fn check_transaction_sanity(
         return Err(ValidationError::OutputSumOverflow);
     }
 
-    let is_coinbase = tx.is_coinbase();
+    // The three passes below are separate on purpose, and in SPEC §4.1's own
+    // order: duplicate outpoints, then script sizes, then the shape rules.
+    // Fusing them into one per-input loop is cheaper by one iteration and
+    // changes the verdict: a transaction whose input 0 is null and whose
+    // input 1 carries an oversized `script_sig` breaks two rules, and SPEC §3.4
+    // makes which one is named part of the contract. `[NULL, NULL]` is the
+    // sharpest case — it is not a coinbase (`is_coinbase` needs exactly one
+    // input), and it is a duplicate outpoint before it is a null one.
     let mut seen = BTreeSet::new();
-    for (index, input) in tx.inputs.iter().enumerate() {
-        if !is_coinbase && input.prev_out.is_null() {
-            return Err(ValidationError::NullInput { input_index: index });
-        }
+    for input in &tx.inputs {
         if !seen.insert(input.prev_out) {
             return Err(ValidationError::DuplicateInput { out_point: input.prev_out });
         }
+    }
+
+    for input in &tx.inputs {
         check_script_size(&input.script_sig)?;
     }
     for out in &tx.outputs {
         check_script_size(&out.script_pubkey)?;
     }
 
-    if is_coinbase {
+    if tx.is_coinbase() {
         check_coinbase_structure(tx)?;
+    } else {
+        for (index, input) in tx.inputs.iter().enumerate() {
+            if input.prev_out.is_null() {
+                return Err(ValidationError::NullInput { input_index: index });
+            }
+        }
     }
 
     Ok(())
@@ -163,20 +186,39 @@ pub fn check_coinbase_structure(tx: &Transaction) -> Result<(), ValidationError>
 
 /// SPEC §3.1 — the context-free block rules, in order.
 ///
-/// 1. `serialized_size(block) <= max_block_size`
+/// 1. `consensus_size(block) <= max_block_size`, and the seal is no longer than
+///    the largest certificate this validator set can produce
 /// 2. `txs` non-empty, `txs[0]` is a coinbase, no other transaction is
 /// 3. `compute_merkle_root(txs) == header.merkle_root`
 /// 4. no duplicate txid within the block
 /// 5. every transaction passes [`check_transaction_sanity`]
 ///
+/// # Why rule 1 does not measure the seal
+///
+/// The seal is outside the header and the merkle root (DECISIONS D2), and a BFT
+/// certificate legally carries anywhere from `quorum` to `n` signatures. If the
+/// size rule counted it, one block hash would have several sizes 66 bytes
+/// apart, and any relay could push a copy over the limit for its neighbours by
+/// adding two more perfectly valid signatures — two honest nodes disagreeing
+/// about one block hash. So the transactions are measured against
+/// `max_block_size` and the seal is bounded on its own (DECISIONS D12).
+///
 /// # Errors
 ///
 /// One variant per rule; see [`ValidationError`].
 pub fn check_block_sanity(block: &Block, params: &ChainParams) -> Result<(), ValidationError> {
-    // 1. Size first: it is the cheapest rule and it bounds every rule after it.
-    let size = block.serialized_size();
+    // 1a. Size first: it is the cheapest rule and it bounds every rule after it.
+    let size = block.consensus_size();
     if size > params.max_block_size {
         return Err(ValidationError::BlockTooLarge { size, max: params.max_block_size });
+    }
+
+    // 1b. The seal, against its own bound. A proof-of-work seal carries no
+    //     payload at all and `validate_seal` says so; this only stops an
+    //     unbounded blob arriving under either engine id before then.
+    let seal_max = BlockSeal::max_data_len(params.bft_validators.len());
+    if block.seal.data.len() > seal_max {
+        return Err(ValidationError::SealTooLarge { size: block.seal.data.len(), max: seal_max });
     }
 
     // 2. Exactly one coinbase, and it is first.

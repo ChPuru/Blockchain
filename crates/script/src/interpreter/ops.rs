@@ -22,11 +22,12 @@ use ripemd::{Digest as _, Ripemd160};
 use crate::error::ScriptError;
 use crate::interpreter::Machine;
 use crate::limits::{
-    SEQUENCE_LOCKTIME_DISABLE_FLAG, SEQUENCE_LOCKTIME_MASK, SEQUENCE_LOCKTIME_TYPE_FLAG,
+    SEQUENCE_LOCKTIME_DISABLE_FLAG, SEQUENCE_LOCKTIME_GRANULARITY, SEQUENCE_LOCKTIME_MASK,
+    SEQUENCE_LOCKTIME_TYPE_FLAG,
 };
 use crate::num::{ScriptNum, cast_to_bool};
 use crate::opcode::Opcode;
-use crate::sighash::{signature_hash, split_signature};
+use crate::sighash::split_signature;
 
 impl Machine<'_, '_> {
     /// Read the top of the stack as an arithmetic operand and pop it.
@@ -326,6 +327,12 @@ impl Machine<'_, '_> {
     ///
     /// Returns `false` only for a well-formed signature that does not verify;
     /// a malformed signature or key is an error.
+    ///
+    /// The digest comes from the machine's [`crate::sighash::SighashCache`], so
+    /// the three transaction-wide mid-states are hashed once rather than once
+    /// per check. A script may legally perform 201 signature checks, and every
+    /// input of the transaction runs this path: recomputing them here is what
+    /// makes validation quadratic in transaction size.
     fn check_signature(
         &mut self,
         signature: &[u8],
@@ -335,8 +342,7 @@ impl Machine<'_, '_> {
         let (sig, ty) = split_signature(signature)?;
         let key_bytes: [u8; 32] = pubkey.try_into().map_err(|_| ScriptError::InvalidPublicKey)?;
         let key = PublicKey::from_bytes(&key_bytes).map_err(|_| ScriptError::InvalidPublicKey)?;
-        let msg = signature_hash(
-            self.ctx.tx,
+        let msg = self.sighash_cache().signature_hash(
             self.ctx.input_index,
             script_code,
             self.ctx.input_value,
@@ -450,6 +456,23 @@ impl Machine<'_, '_> {
     /// block counts, and bits 0..15 carry the value. Bitcoin treats an operand
     /// with bit 31 set as a no-op so that old nodes stay compatible; Ferrum has
     /// no soft-fork hooks and no old nodes, so it is an error.
+    ///
+    /// The opcode has two halves and **both** are needed for it to be a
+    /// timelock at all:
+    ///
+    /// 1. BIP-112, the script half: the operand must not ask for more than the
+    ///    input's `sequence` claims, and must agree with it about blocks vs
+    ///    time. Both of those numbers are written by the spender, so this half
+    ///    on its own enforces nothing.
+    /// 2. BIP-68, the chain half: the input's `sequence` must actually be
+    ///    satisfied by the age of the coin being spent, measured from
+    ///    [`crate::ExecCtx::input_height`] (blocks) or
+    ///    [`crate::ExecCtx::input_mtp_s`] (512-second units of median time
+    ///    past). Without it a `<n> OP_CSV OP_DROP` output is spendable in the
+    ///    very next block by whoever can sign.
+    ///
+    /// A context that cannot supply the coin's age fails the script rather than
+    /// skipping the second half.
     fn check_sequence(&mut self) -> Result<(), ScriptError> {
         let operand = self.peek(0)?.to_vec();
         let value =
@@ -481,6 +504,51 @@ impl Machine<'_, '_> {
         }
         if (required & SEQUENCE_LOCKTIME_MASK) > (sequence & SEQUENCE_LOCKTIME_MASK) {
             return Err(ScriptError::UnsatisfiedSequence { required, sequence });
+        }
+
+        self.check_sequence_age(sequence)
+    }
+
+    /// The BIP-68 half of `OP_CHECKSEQUENCEVERIFY`: measure the input's
+    /// `sequence` against the age of the coin it spends.
+    ///
+    /// `sequence` has already been checked to have the disable bit clear and to
+    /// be at least what the script operand demands, so enforcing the input's
+    /// own claim also enforces the script's.
+    fn check_sequence_age(&self, sequence: u32) -> Result<(), ScriptError> {
+        let relative = sequence & SEQUENCE_LOCKTIME_MASK;
+        if relative == 0 {
+            // The input asks for no delay, so there is nothing to measure and
+            // no reason to demand the coin's age.
+            return Ok(());
+        }
+
+        if sequence & SEQUENCE_LOCKTIME_TYPE_FLAG != 0 {
+            let coin_mtp_s = self.ctx.input_mtp_s.ok_or(ScriptError::UnknownCoinTime)?;
+            // Units of 512 seconds; 0xffff << 9 cannot overflow a u64.
+            let required_s = u64::from(relative)
+                .checked_shl(SEQUENCE_LOCKTIME_GRANULARITY)
+                .ok_or(ScriptError::NumericOverflow)?;
+            let matures_at =
+                coin_mtp_s.checked_add(required_s).ok_or(ScriptError::NumericOverflow)?;
+            if self.ctx.block_mtp_s < matures_at {
+                return Err(ScriptError::ImmatureRelativeTime {
+                    required_s,
+                    coin_mtp_s,
+                    block_mtp_s: self.ctx.block_mtp_s,
+                });
+            }
+        } else {
+            let coin_height = self.ctx.input_height.ok_or(ScriptError::UnknownCoinHeight)?;
+            let matures_at =
+                coin_height.checked_add(u64::from(relative)).ok_or(ScriptError::NumericOverflow)?;
+            if self.ctx.block_height < matures_at {
+                return Err(ScriptError::ImmatureRelativeHeight {
+                    required: relative,
+                    coin_height,
+                    block_height: self.ctx.block_height,
+                });
+            }
         }
         Ok(())
     }

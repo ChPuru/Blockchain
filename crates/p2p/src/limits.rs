@@ -174,6 +174,20 @@ pub const PING_TIMEOUT: Duration = Duration::from_secs(20);
 /// always admitted; peers beyond this are disconnected.
 pub const MAX_PEERS: usize = 64;
 
+/// Maximum simultaneous connections from one peer id.
+///
+/// [`MAX_PEERS`] counts distinct identities, so on its own it bounds nothing
+/// an attacker controls: one keypair can dial as often as it likes and the
+/// peer map still holds one entry. Every surviving connection is a Noise
+/// session, a yamux session with a [`YAMUX_RECEIVE_WINDOW_BYTES`] receive
+/// window and up to [`MAX_CONCURRENT_SYNC_STREAMS`] substreams, so the ceiling
+/// has to be per identity as well as per identity count.
+///
+/// Two rather than one: simultaneous open between a pair of nodes that list
+/// each other legitimately produces two connections for a moment, and closing
+/// one of them on sight would make a static mesh flap.
+pub const MAX_CONNECTIONS_PER_PEER: u32 = 2;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +235,17 @@ mod tests {
         // target_spacing_ms is 120_000, so the cache must span a whole block.
         assert!(configured >= Duration::from_secs(120), "got {configured:?}");
         assert!(configured > libp2p_default);
+    }
+
+    #[test]
+    fn one_identity_is_capped_below_the_peer_ceiling() {
+        let per_peer = MAX_CONNECTIONS_PER_PEER;
+        let peers = MAX_PEERS;
+        assert!(per_peer >= 2, "simultaneous open needs room for two");
+        assert!(
+            u64::from(per_peer) < u64::try_from(peers).expect("the peer ceiling fits a u64"),
+            "one identity must not be able to occupy the whole peer budget"
+        );
     }
 
     #[test]

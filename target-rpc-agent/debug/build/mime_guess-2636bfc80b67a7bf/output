@@ -1,0 +1,1 @@
+cargo:rustc-env=MIME_TYPES_GENERATED_PATH=D:/Blockchain_Crypto/target-rpc-agent\debug\build\mime_guess-2636bfc80b67a7bf\out\mime_types_generated.rs

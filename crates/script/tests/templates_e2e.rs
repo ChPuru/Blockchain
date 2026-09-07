@@ -353,6 +353,34 @@ fn cltv_rejects_a_transaction_locked_too_early() {
 }
 
 #[test]
+fn cltv_round_trip_with_a_locktime_that_needs_five_bytes() {
+    // A locktime at or above 0x8000_0000 needs the extra sign byte, which is
+    // why the operand limit is five and not MAX_NUM_SIZE. The VM executes it,
+    // so `classify` has to agree — otherwise the mempool calls this output
+    // NonStandard and refuses to relay a script the library itself builds.
+    // Unix timestamps cross that boundary in January 2038.
+    let key = secret(23);
+    let deadline: u32 = 0x8000_0000;
+    let script_pubkey = templates::cltv_p2pkh(deadline, &hash160(key.public_key().as_bytes()));
+    assert_eq!(templates::classify(&script_pubkey), ScriptType::Cltv);
+
+    let mut tx = spending_tx(Script::EMPTY, NOT_FINAL, deadline);
+    let signature = sign_all(&key, &tx, &script_pubkey, ChainId::MAINNET);
+    tx.inputs[0].script_sig = script_sig(&[&signature, key.public_key().as_bytes()]);
+
+    assert!(check(&tx, &script_pubkey, ChainId::MAINNET).is_ok());
+
+    // And one second early still fails on the locktime, not on the encoding.
+    let mut early = spending_tx(Script::EMPTY, NOT_FINAL, deadline - 1);
+    let signature = sign_all(&key, &early, &script_pubkey, ChainId::MAINNET);
+    early.inputs[0].script_sig = script_sig(&[&signature, key.public_key().as_bytes()]);
+    assert_eq!(
+        check(&early, &script_pubkey, ChainId::MAINNET),
+        Err(ScriptError::UnsatisfiedLockTime { required: u64::from(deadline), tx: deadline - 1 })
+    );
+}
+
+#[test]
 fn cltv_round_trip_by_timestamp() {
     let key = secret(22);
     let deadline = LOCKTIME_THRESHOLD + 86_400;

@@ -2,15 +2,15 @@
 
 use ferrum_consensus::{HeaderView, compact_to_target, hash_meets_target};
 use ferrum_storage::header_hash;
-use ferrum_types::{Amount, Block, BlockSeal, OutPoint, Script, Txid};
+use ferrum_types::{Amount, Block, BlockSeal, OutPoint, Script, Txid, ValidatorId};
 
 use crate::error::ChainError;
 use crate::manager::AcceptOutcome;
-use crate::template::{block_size_of, build_coinbase, tx_body_size};
+use crate::template::{EMPTY_SEAL_SIZE, block_size_of, build_coinbase, tx_body_size};
 use crate::tests::support::{
     TestChain, any_spend_script, coinbase, devnet, devnet_with, out_point, seal_pow, spend,
 };
-use crate::validate::{check_coinbase_script_sig, compute_merkle_root};
+use crate::validate::{check_block_sanity, check_coinbase_script_sig, compute_merkle_root};
 use crate::view::StoreHeaderView;
 
 fn amount(v: u64) -> Amount {
@@ -33,8 +33,54 @@ fn the_incremental_size_matches_the_encoder() {
         txs.clone(),
         BlockSeal::POW,
     );
-    assert_eq!(block_size_of(&txs), block.serialized_size());
+    // `block_size_of` measures what rule 1 measures: the block without its seal
+    // (DECISIONS D12). Both halves of that are pinned here, so the accounting
+    // cannot drift from the encoder in either direction.
+    assert_eq!(block_size_of(&txs), block.consensus_size());
+    assert_eq!(block.consensus_size() + EMPTY_SEAL_SIZE, block.serialized_size());
     assert_eq!(tx_body_size(&txs[0]), txs[0].serialized_size() - 1);
+}
+
+#[test]
+fn a_full_template_still_fits_once_a_bft_certificate_is_attached() {
+    // The miner is engine-agnostic: `build_template` fills to `max_block_size`
+    // and the engine then attaches whatever seal it produces. At a BFT height
+    // that seal is a commit certificate — 251 bytes for the minimum four-
+    // validator set, 66 more per extra validator — where the old accounting
+    // reserved five. If the size rule counted the seal, the first full block
+    // after activation would be rejected by every node and the chain would halt
+    // until the mempool drained; and the template must not shrink to reserve
+    // room for a value the rule no longer measures.
+    let validators: Vec<ValidatorId> =
+        (0..7).map(|i| ValidatorId::from_bytes([i as u8; 32])).collect();
+    let t = TestChain::with_params(devnet_with(|p| {
+        p.coinbase_maturity = 1;
+        p.max_block_size = 600;
+        p.bft_validators = validators.clone();
+    }));
+    t.extend(2);
+
+    // Pack the template right up to the limit.
+    let funded = t.coinbase_out(1);
+    let value = t.coin_at(&funded).unwrap().value;
+    let filler = spend(
+        &[funded],
+        &[(value.checked_sub(amount(1)).unwrap(), Script::new(vec![0x51; 180]))],
+    );
+    let tmpl = t.chain.build_template(&payout(), 0, vec![filler], 0).unwrap();
+    assert_eq!(tmpl.txs.len(), 2, "the filler must fit, or this proves nothing");
+
+    let seal = BlockSeal::bft(vec![0u8; BlockSeal::max_data_len(validators.len())]);
+    let sealed = Block::new(tmpl.header, tmpl.txs, seal);
+    assert!(
+        sealed.serialized_size() > t.params.max_block_size,
+        "the certificate really is bigger than the slack in the limit"
+    );
+    assert_eq!(
+        check_block_sanity(&sealed, &t.params),
+        Ok(()),
+        "a full template plus the largest legal certificate is still a valid block"
+    );
 }
 
 #[test]
@@ -183,7 +229,7 @@ fn the_template_respects_the_block_size_limit() {
     let tmpl = t.chain.build_template(&payout(), 0, vec![fat], 0).unwrap();
     assert_eq!(tmpl.txs.len(), 1, "the fat transaction does not fit");
     let block = Block::new(tmpl.header, tmpl.txs, BlockSeal::POW);
-    assert!(block.serialized_size() <= 260);
+    assert!(block.consensus_size() <= 260);
 }
 
 #[test]

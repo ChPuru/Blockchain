@@ -5,12 +5,21 @@
 //!
 //! # Caps are applied here as well as on the wire
 //!
-//! `ferrum-p2p` caps every response at 2000 headers and 64 blocks server-side,
-//! whatever the peer asked for (CONTRACT §10.2). This module applies the same
-//! caps *before* building the response, so a peer asking for a million headers
-//! costs one bounded allocation rather than a large one that is then trimmed.
-//! Two layers of the same limit is not redundancy; the outer one protects
-//! against a bug in the inner one.
+//! `ferrum-p2p` caps every response at 2000 headers, 64 blocks and 8 MiB of
+//! block bodies server-side, whatever the peer asked for (CONTRACT §10.2).
+//! This module applies the same caps *before* building the response, so a peer
+//! asking for a million headers costs one bounded allocation rather than a
+//! large one that is then trimmed. Two layers of the same limit is not
+//! redundancy; the outer one protects against a bug in the inner one.
+//!
+//! The byte budget matters as much as the count. Sixty-four maximum-size
+//! blocks are 64 MB, so a count cap alone lets a peer make this node read and
+//! Borsh-decode 64 MB from the store for a two-kilobyte request and then throw
+//! most of it away on the way out. [`bodies`] therefore accumulates
+//! [`ferrum_types::Block::serialized_size`] as it reads and stops as soon as
+//! one more block would cross [`MAX_BLOCK_BYTES_SERVED`] — keeping at least
+//! one block, exactly as the outer cap does, because an empty answer for a
+//! legal block stalls sync forever.
 
 use std::sync::Arc;
 
@@ -24,6 +33,12 @@ pub const MAX_HEADERS_SERVED: usize = 2_000;
 
 /// Largest block response this node builds.
 pub const MAX_BLOCKS_SERVED: usize = 64;
+
+/// Byte budget for one block response, enforced while it is being read.
+///
+/// The same number the wire layer trims to, applied here so the bytes are
+/// never read in the first place.
+pub const MAX_BLOCK_BYTES_SERVED: usize = ferrum_p2p::limits::MAX_RESPONSE_BODY_BYTES;
 
 /// Largest locator this node will walk.
 ///
@@ -85,12 +100,49 @@ pub fn headers(
 /// A hash we do not have is skipped rather than reported: the asker sees a
 /// short answer and re-requests, which is what it would do for a dropped
 /// response anyway.
+///
+/// Bounded by [`MAX_BLOCKS_SERVED`] *and* by [`MAX_BLOCK_BYTES_SERVED`], both
+/// applied while reading.
 #[must_use]
 pub fn bodies(chain: &Arc<ChainManager>, hashes: &[BlockHash]) -> Vec<Block> {
-    let mut out = Vec::new();
+    bodies_within(chain, hashes, MAX_BLOCK_BYTES_SERVED)
+}
+
+/// [`bodies`] with an explicit byte budget.
+///
+/// The budget is checked **before** the next block is added, not after the
+/// whole response is built: a peer asking for 64 hashes of maximum-size blocks
+/// would otherwise make this node read and decode 64 MB from the store and
+/// then discard seven eighths of it, eight times over on the serve pool, for
+/// the price of a two-kilobyte request.
+///
+/// At least one block is always returned even when it alone exceeds the
+/// budget. A legal block that no response can carry would stall the asker's
+/// sync forever, and that is a worse failure than one oversized response.
+#[must_use]
+pub fn bodies_within(
+    chain: &Arc<ChainManager>,
+    hashes: &[BlockHash],
+    max_bytes: usize,
+) -> Vec<Block> {
+    let mut out: Vec<Block> = Vec::new();
+    let mut used: usize = 0;
     for hash in hashes.iter().take(MAX_BLOCKS_SERVED) {
         match chain.store().get_block(hash) {
-            Ok(Some(block)) => out.push(block),
+            Ok(Some(block)) => {
+                let next = used.saturating_add(block.serialized_size());
+                if !out.is_empty() && next > max_bytes {
+                    tracing::debug!(
+                        served = out.len(),
+                        asked = hashes.len(),
+                        max_bytes,
+                        "block response reached its byte budget"
+                    );
+                    break;
+                }
+                used = next;
+                out.push(block);
+            }
             Ok(None) => {}
             Err(e) => tracing::warn!(%hash, error = %e, "could not read a requested block"),
         }
@@ -227,6 +279,42 @@ mod tests {
         let chain = chain_with(1);
         let response = answer(&chain, &SyncRequest::GetBlocks { hashes: vec![BlockHash::ZERO] });
         assert!(matches!(response, SyncResponse::NotFound), "{response:?}");
+    }
+
+    #[test]
+    fn the_byte_budget_stops_the_read_loop_rather_than_the_response() {
+        let chain = chain_with(6);
+        let wanted: Vec<BlockHash> =
+            (1..=6u64).map(|h| chain.store().hash_at_height(h).unwrap().unwrap()).collect();
+        let all = bodies(&chain, &wanted);
+        assert_eq!(all.len(), 6, "the devnet fixture is far under the real budget");
+
+        // A budget that fits exactly the first three blocks.
+        let budget: usize = all.iter().take(3).map(Block::serialized_size).sum();
+        let got = bodies_within(&chain, &wanted, budget);
+        assert_eq!(got.len(), 3, "the fourth block must never be read");
+        let bytes: usize = got.iter().map(Block::serialized_size).sum();
+        assert!(bytes <= budget, "{bytes} bytes served against a {budget} byte budget");
+        for (block, hash) in got.iter().zip(&wanted) {
+            assert_eq!(ferrum_storage::header_hash(&block.header), *hash);
+        }
+    }
+
+    #[test]
+    fn one_block_is_served_even_when_it_alone_exceeds_the_budget() {
+        // An empty answer for a legal block would stall the asker's sync for
+        // ever, which is worse than one oversized response.
+        let chain = chain_with(3);
+        let wanted: Vec<BlockHash> =
+            (1..=3u64).map(|h| chain.store().hash_at_height(h).unwrap().unwrap()).collect();
+        let got = bodies_within(&chain, &wanted, 1);
+        assert_eq!(got.len(), 1);
+        assert_eq!(ferrum_storage::header_hash(&got[0].header), wanted[0]);
+    }
+
+    #[test]
+    fn the_default_budget_is_the_wire_budget() {
+        assert_eq!(MAX_BLOCK_BYTES_SERVED, ferrum_p2p::limits::MAX_RESPONSE_BODY_BYTES);
     }
 
     #[test]

@@ -37,6 +37,22 @@ fn cli(datadir: &Path, rpc_url: &str, args: &[&str]) -> String {
     String::from_utf8_lossy(&assert.get_output().stdout).to_string()
 }
 
+/// Like [`cli`], but hands back whether the command succeeded instead of
+/// insisting that it did.
+fn cli_try(datadir: &Path, rpc_url: &str, args: &[&str]) -> (bool, String) {
+    let output = CliCommand::cargo_bin("chain-cli")
+        .expect("chain-cli is a bin target of this crate")
+        .arg("--datadir")
+        .arg(datadir)
+        .arg("--rpc")
+        .arg(rpc_url)
+        .args(args)
+        .env("FERRUM_DATADIR", datadir)
+        .output()
+        .expect("chain-cli ran");
+    (output.status.success(), String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 /// The last line of stdout — the value CONTRACT §13.1 promises there.
 fn last_line(text: &str) -> String {
     text.lines().next_back().unwrap_or_default().trim().to_owned()
@@ -151,6 +167,33 @@ async fn create_mine_send_and_read_the_balance_back_from_the_utxo_set() {
     // mined, and `getrawtransaction` finds it either way.
     let found = client.get_raw_transaction(txid.clone(), Some(true)).await;
     assert!(found.is_ok(), "the node does not know {txid}: {found:?}");
+
+    // ---- the same send again, inside the same block interval ------------
+    // Both invocations build against the same *confirmed* UTXO set — the node
+    // never reports its mempool to `listunspent`/`gettxout` — so the second
+    // one used to rebuild a byte-identical transaction, the mempool answered
+    // "already in the pool", and `sendrawtransaction` reported that as a plain
+    // success. The operator is then told they paid twice and paid once.
+    //
+    // Either outcome is honest: a refusal, or a genuinely different payment
+    // (a block may confirm the first send in between). Reporting the *same*
+    // txid as a second success is the thing that must never happen.
+    let (repeated_ok, repeated_out) = tokio::task::spawn_blocking({
+        let dir = wallet_dir_path.clone();
+        let url = url.clone();
+        let to = payout.clone();
+        move || cli_try(&dir, &url, &["wallet", "send", "--to", &to, "--amount", "1.0"])
+    })
+    .await
+    .expect("the repeated wallet send subprocess ran");
+
+    if repeated_ok {
+        assert_ne!(
+            last_line(&repeated_out),
+            txid,
+            "one transaction was reported as two successful payments",
+        );
+    }
 
     // ---- the other read commands answer against the same node ------------
     let info = tokio::task::spawn_blocking({

@@ -105,7 +105,15 @@ Rules are grouped by what they need, because that grouping is what allows header
 
 ### 3.1 Context-free (needs only the block)
 
-1. **`serialized_size(block) ≤ max_block_size`.**
+1. **`consensus_size(block) ≤ max_block_size`**, where `consensus_size` is the header, the
+   transaction count and the transactions — everything the block hash commits to — **without the
+   seal**; and the seal payload is at most `48 + 66 × len(bft_validators)` bytes, the largest commit
+   certificate that validator set can produce.
+   The seal is excluded because it is outside the header and the merkle root (DECISIONS D2) and a
+   BFT certificate legally carries anywhere from `quorum` to `n` signatures. A size rule that
+   counted it would give one block hash several sizes 66 bytes apart, so a relay could push a copy
+   over the limit for its neighbours by adding two more valid signatures. The seal is bounded on its
+   own instead (DECISIONS D12).
 2. **`txs` is non-empty**, `txs[0].is_coinbase()`, and **no other transaction is a coinbase**.
 3. **`compute_merkle_root(txs) == header.merkle_root`.**
 4. **No duplicate txid within the block.**
@@ -129,7 +137,9 @@ Rules are grouped by what they need, because that grouping is what allows header
 
 12. Every non-coinbase transaction passes §4.2 (contextual validation) against an overlay of the UTXO
     set at the parent, applied **in block order**, so a transaction may spend an output created by an
-    earlier transaction in the same block but never by a later one.
+    earlier **non-coinbase** transaction in the same block but never by a later one. The coinbase's
+    own outputs are **not** in that overlay — they join the UTXO set when the block is connected —
+    so a transaction naming one of them is rejected with `MissingInput`.
 13. **Coinbase value**: `sum(coinbase.outputs) ≤ block_subsidy(height) + total_fees`.
 14. **Coinbase `script_sig`** is between 2 and 100 bytes and **begins with a minimally-encoded push
     of `height`**.
@@ -143,6 +153,15 @@ Enforcing it from genesis costs nothing and closes the class permanently.
 Rule 15 is then redundant with rule 14 for coinbases, but it is kept because it also covers the case
 of a non-coinbase transaction colliding with an existing outpoint, and defence in depth on the
 inflation path is cheap.
+
+The sentence in rule 12 about the coinbase is there because the two readings of "an earlier
+transaction in the same block" differ observably. Under the reading that includes transaction 0, a
+block's own coinbase is spendable within that block as soon as `coinbase_maturity` is 0, and the
+coinbase's value rule (13) is then computed from a fee paid by a transaction spending the very
+output whose value that rule bounds. Excluding it removes the circularity and makes the verdict
+independent of `coinbase_maturity`: `MissingInput`, always. At any positive maturity the two
+readings reject the same blocks and differ only in which variant they name, which §3.4 makes
+observable, so the choice has to be written down rather than left to each implementation.
 
 ### 3.4 Errors are specific
 
@@ -211,6 +230,48 @@ BIP-68 semantics on `TxIn::sequence`:
 
 `OP_CHECKSEQUENCEVERIFY` fails unless the input's sequence encodes a relative lock of the same type
 and at least the required magnitude.
+
+That comparison is only the first half of the rule and on its own enforces **nothing**: both the
+script operand and `sequence` are written by the spender. The second half is BIP-68 proper — the
+input's `sequence` must be satisfied by the **age of the coin being spent**, and the opcode fails
+unless:
+
+- block count (bit 22 clear): `spending height ≥ coin height + (sequence & 0xffff)`;
+- time (bit 22 set): `spending median time past ≥ the coin's median time past +
+  ((sequence & 0xffff) << 9)` seconds.
+
+The lock is measured against the input's `sequence`, not the script operand, which is stricter and
+is what BIP-68 says; the first half has already established that `sequence` is at least what the
+operand demands. `sequence & 0xffff == 0` asks for no delay, so no age is needed. A caller that
+cannot supply the coin's age (`ExecCtx::input_height` / `input_mtp_s` are `None`) fails the opcode
+rather than skipping the check: a relative timelock that cannot be verified is not satisfied.
+
+Without the second half, a `<n> OP_CHECKSEQUENCEVERIFY OP_DROP …` output is spendable in the very
+next block by whoever can sign — every channel refund leg and every vault delay silently has no
+delay at all.
+
+That opcode is only the **script half** (BIP-112), and both numbers it compares — the script operand
+and `TxIn::sequence` — are written by the spender. It becomes a timelock only with the **chain
+half**, a contextual rule applied to every input of every non-coinbase transaction, in §4.2 order
+immediately after finality (§4.3):
+
+- **Block count** (bit 31 clear, bit 22 clear), with `n` the low 16 bits: the block is invalid
+  unless `height ≥ coin.height + n`. So a lock of `n` blocks requires the coin to be at least `n`
+  blocks deep, `n = 0` locks nothing, and a coin created by an *earlier transaction in the same
+  block* has `coin.height == height` and therefore satisfies no `n ≥ 1`.
+- **512-second units** (bit 31 clear, bit 22 set): **rejected**. Evaluating it needs the median time
+  past of the block that created the coin, and the `apply_block` seam cannot see it — `BlockCtx`
+  carries only the parent's median and `Coin` carries only a height. A timelock that cannot be
+  evaluated must fail *closed*: accepting the input would mean the lock silently is not a lock.
+  Supporting the flavour means carrying the creating block's median time past into `BlockCtx` (and
+  into `ExecCtx::input_mtp_s`), and is a consensus change, not an implementation detail.
+- **Disabled** (bit 31 set): no rule applies. `TxIn::SEQUENCE_FINAL` and the wallet's
+  `0xffff_fffe` both land here, which is why ordinary transactions are unaffected.
+
+Without the chain half, `<n> OP_CHECKSEQUENCEVERIFY OP_DROP …` is spendable in the very next block
+by anyone who can satisfy the rest of the script: every channel refund leg, vault delay and HTLC
+timeout built on it would be worthless. It is stated here because a second implementer reading only
+the opcode's description would write exactly that bug.
 
 ---
 
@@ -415,7 +476,12 @@ promptly.
 
 ### 9.2 BFT (Tendermint-shaped, permissioned)
 
-Validators come from `ChainParams::bft_validators`, `n ≥ 4`, `f = (n-1)/3`, quorum `2f+1`.
+Validators come from `ChainParams::bft_validators`, `n ≥ 4`, `f = (n-1)/3`, quorum `2f+1`, and
+`2·(2f+1) > n`. That last condition is quorum intersection — any two quorums share a validator — and
+it is what "it will never fork" rests on. With `f = (n-1)/3` it holds for every set size but `n = 6`,
+where `f = 1`, the quorum is 3, and the two disjoint quorums `{0,1,2}` and `{3,4,5}` can each commit
+a different block at one height with only one faulty validator. A six-validator set is therefore
+refused at startup rather than warned about. Prefer `n = 3f+1`: 4, 7, 10, 13.
 
 Round: **propose → prevote → precommit → commit**, proposer
 `validators[(height + round) mod n]`, timeouts doubling per round.

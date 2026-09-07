@@ -30,7 +30,7 @@ use std::path::Path;
 use ferrum_crypto::{Address, DerivationPath, ExtendedKey, PublicKey, SecretKey};
 use ferrum_p2p::{Keypair, PeerId};
 use ferrum_types::Network;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::NodeError;
 
@@ -97,8 +97,21 @@ impl NodeKey {
     /// bytes — refusing is right, because overwriting it would change this
     /// node's `PeerId` and break every peer that lists it.
     pub fn load_or_create(path: &Path) -> Result<Self, NodeError> {
-        match std::fs::read_to_string(path) {
-            Ok(text) => Self::parse(&text, path),
+        // Read the bytes and scrub them: `read_to_string` hands back a plain
+        // `String` holding the seed hex, which is dropped as an ordinary heap
+        // allocation and stays readable in a later core dump. The borrow into
+        // `parse` copies nothing.
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                let bytes = Zeroizing::new(bytes);
+                let text = std::str::from_utf8(&bytes).map_err(|e| {
+                    NodeError::io(
+                        format!("{} is not valid UTF-8", path.display()),
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
+                    )
+                })?;
+                Self::parse(text, path)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let key = NodeKey::generate();
                 key.write(path)?;
@@ -138,9 +151,10 @@ impl NodeKey {
 
     /// Write the key to `path`, creating the parent directory if needed.
     ///
-    /// On Unix the file is created with mode `0600`. Windows has no equivalent
-    /// one-liner and the datadir's own ACL is the protection there; saying so
-    /// is better than pretending the call is portable.
+    /// On Unix the file is created with mode `0600` **by the `open` call
+    /// itself**, not narrowed afterwards. Windows
+    /// has no equivalent one-liner and the datadir's own ACL is the protection
+    /// there; saying so is better than pretending the call is portable.
     ///
     /// # Errors
     ///
@@ -152,13 +166,14 @@ impl NodeKey {
             std::fs::create_dir_all(parent)
                 .map_err(|e| NodeError::io(format!("creating {}", parent.display()), e))?;
         }
-        let mut text = self.to_hex();
+        // Reserved to the exact final size: pushing onto a full `String`
+        // reallocates and leaves the seed hex in freed heap, which is the one
+        // thing this function exists to keep off disk.
+        let mut text =
+            Zeroizing::new(String::with_capacity(NODE_KEY_SEED_LEN.saturating_mul(2) + 1));
+        text.push_str(&Zeroizing::new(self.to_hex()));
         text.push('\n');
-        std::fs::write(path, text.as_bytes())
-            .map_err(|e| NodeError::io(format!("writing {}", path.display()), e))?;
-        text.zeroize();
-        set_owner_only(path)?;
-        Ok(())
+        write_owner_only(path, text.as_bytes())
     }
 
     /// The seed as lowercase hex, which is exactly the file's contents.
@@ -241,6 +256,37 @@ impl NodeKey {
 pub fn derive_receive_key(seed: &[u8], account: u32) -> Result<SecretKey, NodeError> {
     let path = DerivationPath::ferrum(account, 0, 0)?;
     Ok(ExtendedKey::master_from_seed(seed)?.derive_path(&path)?.secret_key())
+}
+
+/// Create `path` owner-only and write `bytes` into it.
+///
+/// `std::fs::write` creates with `0o666 & ~umask` — 0644 under the usual umask
+/// — so the seed is world-readable for the length of the write, and a
+/// descriptor opened inside that window keeps its access after any later
+/// `chmod`, because Unix checks permissions at `open` and never again. The
+/// mode therefore belongs on the `open` call. An existing file cannot take its
+/// mode from `open`, so that case is narrowed *before* the secret is written
+/// rather than after.
+///
+/// # Errors
+///
+/// [`NodeError::Io`] naming the file.
+fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), NodeError> {
+    use std::io::Write as _;
+
+    if path.exists() {
+        set_owner_only(path)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file =
+        options.open(path).map_err(|e| NodeError::io(format!("creating {}", path.display()), e))?;
+    file.write_all(bytes).map_err(|e| NodeError::io(format!("writing {}", path.display()), e))
 }
 
 /// Restrict a key file to its owner where the platform supports it.

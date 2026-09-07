@@ -41,6 +41,15 @@
 //!    round. The CONTRACT order is followed: it checks the cheap structural
 //!    rule before the one that needs every fee in the block.
 //!
+//! A third reading used to be left open here and is now settled in the
+//! specification itself: rule 12's "an output created by an earlier
+//! transaction in the same block" does **not** include transaction 0. The
+//! coinbase's outputs are recorded in the diff but never published into the
+//! block's own overlay, so a transaction naming one of them is `MissingInput`
+//! at every `coinbase_maturity` rather than `ImmatureCoinbaseSpend` at
+//! positive ones and *valid* at zero. See SPEC §3.3 rule 12 and
+//! `mutate::spend_of_the_blocks_own_coinbase`.
+//!
 //! [`docs/SPEC.md`]: https://github.com/rahuldhali/ferrum/blob/main/docs/SPEC.md
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,6 +57,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use ferrum_chain::{BlockCtx, ValidationError};
 use ferrum_consensus::{
     ConsensusError, MIN_BLOCK_VERSION, Target, compact_to_target, hash_meets_target,
+};
+use ferrum_script::limits::{
+    SEQUENCE_LOCKTIME_DISABLE_FLAG, SEQUENCE_LOCKTIME_MASK, SEQUENCE_LOCKTIME_TYPE_FLAG,
 };
 use ferrum_script::{ExecCtx, MAX_SCRIPT_SIZE, ScriptLimits};
 use ferrum_storage::{StateDiff, StateView};
@@ -208,6 +220,12 @@ fn reference_check_header(block: &Block, ctx: &BlockCtx) -> Result<(), Validatio
         }));
     }
 
+    // `bits` is a hashed header field, so every node must read it the same
+    // way whichever engine sealed the block: a compact target that does not
+    // expand, is zero, or is easier than `pow_limit` is malformed at every
+    // height. SPEC §3.2 rule 8's "(PoW engine only)" scopes the *hash
+    // comparison* — the work itself — and nothing else; under BFT the seal is
+    // the proof and the nonce is required to be zero.
     let target = compact_to_target(header.bits).map_err(ValidationError::Header)?;
     if target.is_zero() {
         return Err(ValidationError::Header(ConsensusError::ZeroTarget));
@@ -219,9 +237,6 @@ fn reference_check_header(block: &Block, ctx: &BlockCtx) -> Result<(), Validatio
             limit,
         }));
     }
-
-    // SPEC §9: only the proof-of-work engine spends work on the header hash.
-    // Under BFT the seal, not the nonce, is the proof.
     if ctx.engine_id == BlockSeal::ENGINE_POW {
         let hash = reference_block_hash(header);
         if !hash_meets_target(&hash, target) {
@@ -286,6 +301,57 @@ pub fn reference_check_coinbase_script_sig(
     };
     if found != reference_height_push(height) {
         return Err(ValidationError::CoinbaseHeightMismatch { expected: height, found });
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SPEC §4.4 — relative locktime (BIP-68)
+// ---------------------------------------------------------------------------
+
+/// The contextual half of `OP_CHECKSEQUENCEVERIFY`.
+///
+/// SPEC §4.4 reads `TxIn::sequence` as: bit 31 set disables the relative lock
+/// for this input; bit 22 set makes the value a count of 512-second units
+/// rather than of blocks; bits 0–15 carry the value. The script opcode checks
+/// only that the *spender's* `sequence` asks for at least what the script
+/// demands, so without this rule a relative timelock is not a lock at all —
+/// the spender simply writes the sequence the script wants and spends
+/// immediately.
+///
+/// The 512-second flavour needs the median time past of the block that created
+/// the coin, which is not in [`BlockCtx`], so it fails closed rather than
+/// passing an unevaluated lock.
+fn reference_check_relative_lock(
+    tx_index: usize,
+    input_index: usize,
+    sequence: u32,
+    coin_height: u64,
+    ctx: &BlockCtx,
+) -> Result<(), ValidationError> {
+    if sequence & SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
+        return Ok(());
+    }
+    if sequence & SEQUENCE_LOCKTIME_TYPE_FLAG != 0 {
+        return Err(ValidationError::UnsupportedRelativeTimeLock {
+            tx_index,
+            input_index,
+            sequence,
+        });
+    }
+    let required = sequence & SEQUENCE_LOCKTIME_MASK;
+    let spendable_at = coin_height
+        .checked_add(u64::from(required))
+        .ok_or(ValidationError::Arithmetic("relative locktime height"))?;
+    if ctx.height < spendable_at {
+        return Err(ValidationError::UnsatisfiedRelativeLock {
+            tx_index,
+            input_index,
+            sequence,
+            required,
+            coin_height,
+            spend_height: ctx.height,
+        });
     }
     Ok(())
 }
@@ -366,6 +432,14 @@ pub fn apply_block_reference(
 
     // The coinbase's outputs come first so that `created` is in
     // (transaction index, vout) order, which is what `StateDiff` promises.
+    //
+    // They are recorded in the diff but **not** published into `state`. Rule 12
+    // validates every non-coinbase transaction "against an overlay of the UTXO
+    // set at the parent", and the coinbase's outputs are not in the parent's
+    // set — they join it when the block is connected. A transaction naming one
+    // of them therefore gets `MissingInput`, at every `coinbase_maturity`
+    // including zero, rather than resolving a coin whose own value depends on
+    // the fee paid by the transaction spending it.
     let coinbase_id = *txids.first().ok_or(ValidationError::EmptyBlock)?;
     for (vout, out) in coinbase.outputs.iter().enumerate() {
         let op = OutPoint::new(coinbase_id, u32::try_from(vout).unwrap_or(u32::MAX));
@@ -375,7 +449,6 @@ pub fn apply_block_reference(
             height: ctx.height,
             is_coinbase: true,
         };
-        state.create(op, coin.clone());
         created.push((op, coin));
     }
 
@@ -445,6 +518,16 @@ pub fn apply_block_reference(
             return Err(ValidationError::NonFinalTransaction { tx_index, lock_time: tx.lock_time });
         }
 
+        // §4.4 — relative locktime. `OP_CHECKSEQUENCEVERIFY` compares the
+        // script's operand against a `sequence` the spender writes freely; it
+        // is a timelock only because this rule separately requires the coin to
+        // be old enough for that `sequence` to be legal.
+        for (input_index, (input, (_, coin))) in
+            tx.inputs.iter().zip(resolved.iter()).enumerate()
+        {
+            reference_check_relative_lock(tx_index, input_index, input.sequence, coin.height, ctx)?;
+        }
+
         // §4.2 step 3 — scripts.
         for (input_index, input) in tx.inputs.iter().enumerate() {
             let coin = resolved
@@ -456,8 +539,20 @@ pub fn apply_block_reference(
                 tx,
                 input_index,
                 input_value: coin.value,
+                // §4.4 — the age of the coin being spent, which is what turns
+                // `OP_CHECKSEQUENCEVERIFY` into an actual relative timelock.
+                // The creating block's median time past is not reachable from
+                // this seam, so the 512-second flavour has no reference point
+                // and fails closed.
+                input_height: Some(coin.height),
+                input_mtp_s: None,
                 block_height: ctx.height,
                 block_mtp_s: ctx.median_time_past_s,
+                // Deliberately no cache. The reference recomputes every
+                // sighash mid-state from the transaction, so a bug in
+                // production's shared cache shows up as a differential
+                // disagreement rather than being mirrored here.
+                sighash_cache: None,
                 limits: ScriptLimits::CONSENSUS,
             };
             ferrum_script::verify(&input.script_sig, &coin.script_pubkey, &exec).map_err(

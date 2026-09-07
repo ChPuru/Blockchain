@@ -9,6 +9,7 @@
 #![allow(clippy::unwrap_used)]
 
 mod address_tests;
+mod budget_tests;
 mod error_tests;
 mod faucet_tests;
 mod fixture;

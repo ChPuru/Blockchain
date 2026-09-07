@@ -5,7 +5,7 @@ use ferrum_script::MAX_SCRIPT_SIZE;
 use ferrum_storage::txid;
 use ferrum_types::{
     Amount, Block, BlockHash, BlockSeal, Hash32, LOCKTIME_THRESHOLD, OutPoint, Script, Transaction,
-    TxIn, TxOut, Txid,
+    TxIn, TxOut, Txid, ValidatorId,
 };
 
 use crate::error::ValidationError;
@@ -286,13 +286,67 @@ fn an_ordinary_block_passes_sanity() {
 fn a_block_over_the_size_limit_is_rejected() {
     let mut params = devnet();
     let block = simple_block(vec![coinbase(0, amount(50), b"g")]);
-    params.max_block_size = block.serialized_size() - 1;
+    // Rule 1 measures the block without its seal (DECISIONS D12), so the limit
+    // that must reject this block is one byte under *that*.
+    params.max_block_size = block.consensus_size() - 1;
     assert_eq!(
         check_block_sanity(&block, &params),
         Err(ValidationError::BlockTooLarge {
-            size: block.serialized_size(),
+            size: block.consensus_size(),
             max: params.max_block_size,
         })
+    );
+
+    // Exactly at the limit is legal: the rule is `<=`.
+    params.max_block_size = block.consensus_size();
+    assert_eq!(check_block_sanity(&block, &params), Ok(()));
+}
+
+#[test]
+fn the_size_rule_does_not_move_when_the_certificate_does() {
+    // n = 7, quorum = 5: `verify_commit` accepts 5, 6 or 7 signatures over the
+    // same block hash, and the seal is not committed to by the header. If rule 1
+    // measured it, a relay could re-encode a block that node A accepted with two
+    // more valid signatures and node B would reject the same block hash as too
+    // large. Both copies must get the same verdict.
+    let mut params = devnet();
+    params.bft_validators = (0..7).map(|i| ValidatorId::from_bytes([i as u8; 32])).collect();
+
+    let txs = vec![coinbase(0, amount(50), b"g")];
+    let quorum_seal = BlockSeal::bft(vec![0u8; BlockSeal::BFT_COMMIT_FIXED + 5 * 66]);
+    let full_seal = BlockSeal::bft(vec![0u8; BlockSeal::BFT_COMMIT_FIXED + 7 * 66]);
+    let lean = Block::new(simple_block(txs.clone()).header, txs.clone(), quorum_seal);
+    let fat = Block::new(lean.header, txs, full_seal);
+
+    // A limit that the smaller copy exactly meets.
+    params.max_block_size = lean.consensus_size();
+    assert!(fat.serialized_size() > params.max_block_size, "the fat copy really is bigger on the wire");
+    assert_eq!(check_block_sanity(&lean, &params), Ok(()));
+    assert_eq!(
+        check_block_sanity(&fat, &params),
+        Ok(()),
+        "one block hash, one verdict: the seal is not part of the size rule"
+    );
+}
+
+#[test]
+fn a_seal_longer_than_the_validator_set_allows_is_rejected() {
+    // The seal is bounded on its own, so dropping it out of rule 1 does not
+    // leave it unbounded: the largest legal certificate is 2f+1..=n signatures,
+    // i.e. `48 + 66n` bytes.
+    let mut params = devnet();
+    params.bft_validators = (0..4).map(|i| ValidatorId::from_bytes([i as u8; 32])).collect();
+    let max = BlockSeal::max_data_len(4);
+
+    let txs = vec![coinbase(0, amount(50), b"g")];
+    let header = simple_block(txs.clone()).header;
+    let at_limit = Block::new(header, txs.clone(), BlockSeal::bft(vec![0u8; max]));
+    assert_eq!(check_block_sanity(&at_limit, &params), Ok(()));
+
+    let over = Block::new(header, txs, BlockSeal::bft(vec![0u8; max + 1]));
+    assert_eq!(
+        check_block_sanity(&over, &params),
+        Err(ValidationError::SealTooLarge { size: max + 1, max })
     );
 }
 
@@ -572,4 +626,89 @@ fn a_coinbase_built_by_hand_can_be_pointed_at() {
     let cb = coinbase_with_script_sig(Script::new(vec![0x00, 0x01]), amount(5));
     assert!(cb.is_coinbase());
     assert_eq!(out_point(&cb, 0), OutPoint::new(txid(&cb), 0));
+}
+
+// ------------------------------------------ SPEC §4.1: the order of the rules
+//
+// SPEC §4.1 lists the bullets as: non-empty; output values; output sum;
+// **no duplicate OutPoint**; **script sizes**; then the coinbase shape and the
+// non-coinbase null-input rule. The reference executor implements exactly
+// that. A transaction that breaks the null rule *and* one of the two before it
+// is the only way that order is observable, and SPEC §3.4 makes the variant
+// the contract.
+
+#[test]
+fn two_null_inputs_are_a_duplicate_before_they_are_a_null_input() {
+    // Two null outpoints, so `is_coinbase()` is false (it needs exactly one
+    // input) and both the duplicate rule and the null rule apply.
+    let tx = Transaction {
+        version: 1,
+        inputs: vec![TxIn::new(OutPoint::NULL, Script::EMPTY), TxIn::new(OutPoint::NULL, Script::EMPTY)],
+        outputs: vec![TxOut::new(amount(1), any_spend_script())],
+        lock_time: 0,
+    };
+    assert!(!tx.is_coinbase(), "two inputs is not a coinbase shape");
+    assert_eq!(
+        check_transaction_sanity(&tx, &devnet()),
+        Err(ValidationError::DuplicateInput { out_point: OutPoint::NULL }),
+        "SPEC §4.1 checks duplicate outpoints before the null-input rule"
+    );
+}
+
+#[test]
+fn an_oversized_script_sig_is_reported_before_a_null_input() {
+    let tx = Transaction {
+        version: 1,
+        inputs: vec![
+            TxIn::new(OutPoint::NULL, Script::EMPTY),
+            TxIn::new(
+                OutPoint::new(Txid(Hash32::from_bytes([9; 32])), 0),
+                Script::new(vec![0x00; MAX_SCRIPT_SIZE + 1]),
+            ),
+        ],
+        outputs: vec![TxOut::new(amount(1), any_spend_script())],
+        lock_time: 0,
+    };
+    assert_eq!(
+        check_transaction_sanity(&tx, &devnet()),
+        Err(ValidationError::ScriptTooLarge { len: MAX_SCRIPT_SIZE + 1, max: MAX_SCRIPT_SIZE }),
+        "SPEC §4.1 checks script sizes before the null-input rule"
+    );
+}
+
+#[test]
+fn an_oversized_script_pubkey_is_reported_before_a_null_input() {
+    let tx = Transaction {
+        version: 1,
+        inputs: vec![
+            TxIn::new(OutPoint::new(Txid(Hash32::from_bytes([9; 32])), 0), Script::EMPTY),
+            TxIn::new(OutPoint::NULL, Script::EMPTY),
+        ],
+        outputs: vec![TxOut::new(amount(1), Script::new(vec![0x00; MAX_SCRIPT_SIZE + 1]))],
+        lock_time: 0,
+    };
+    assert_eq!(
+        check_transaction_sanity(&tx, &devnet()),
+        Err(ValidationError::ScriptTooLarge { len: MAX_SCRIPT_SIZE + 1, max: MAX_SCRIPT_SIZE }),
+        "every script size is read before the null-input rule"
+    );
+}
+
+#[test]
+fn the_null_input_rule_still_names_the_offending_index() {
+    // The order moved; the verdict for a transaction that breaks *only* the
+    // null rule did not.
+    let tx = Transaction {
+        version: 1,
+        inputs: vec![
+            TxIn::new(OutPoint::new(Txid(Hash32::from_bytes([1; 32])), 0), Script::EMPTY),
+            TxIn::new(OutPoint::NULL, Script::EMPTY),
+        ],
+        outputs: vec![TxOut::new(amount(1), any_spend_script())],
+        lock_time: 0,
+    };
+    assert_eq!(
+        check_transaction_sanity(&tx, &devnet()),
+        Err(ValidationError::NullInput { input_index: 1 })
+    );
 }

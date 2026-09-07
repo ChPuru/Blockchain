@@ -37,6 +37,9 @@ impl ValidatorSet {
     /// - [`ConsensusError::ValidatorSetTooSmall`] below [`MIN_VALIDATORS`];
     /// - [`ConsensusError::ValidatorSetTooLarge`] past `u16::MAX` members,
     ///   because the commit certificate indexes validators with a `u16`;
+    /// - [`ConsensusError::NoQuorumIntersection`] when two disjoint quorums
+    ///   exist, which is `n = 6` and nothing else — see
+    ///   [`ValidatorSet::has_quorum_intersection`];
     /// - [`ConsensusError::DuplicateValidator`] when a key repeats, which would
     ///   let one key fill two quorum slots;
     /// - [`ConsensusError::InvalidValidatorKey`] when a key is not a valid
@@ -63,7 +66,18 @@ impl ValidatorSet {
             })?;
             keys.push(key);
         }
-        Ok(ValidatorSet { ids, keys })
+        let set = ValidatorSet { ids, keys };
+        // Quorum intersection is not a nicety; it is the whole reason a `2f+1`
+        // certificate means anything. A set without it can fork under a single
+        // Byzantine validator, which is inside the tolerance the same set
+        // claims, so it must never reach a running node.
+        if !set.has_quorum_intersection() {
+            return Err(ConsensusError::NoQuorumIntersection {
+                validators: set.len(),
+                quorum: set.quorum(),
+            });
+        }
+        Ok(set)
     }
 
     /// Number of validators, `n`.
@@ -111,15 +125,23 @@ impl ValidatorSet {
     /// Safety needs any two quorums to intersect, i.e. `2 * (2f + 1) > n`. With
     /// `f = (n - 1) / 3` that holds for every set size except **`n = 6`**,
     /// where `f = 1` and two disjoint quorums of three exist. The contract
-    /// fixes the formula, so this returns it unchanged;
-    /// [`ValidatorSet::has_quorum_intersection`] is how a caller notices, and
-    /// operators should use `n = 3f + 1`: 4, 7, 10, 13.
+    /// fixes the formula, so this returns it unchanged; what changes is which
+    /// set sizes are admissible at all — [`ValidatorSet::new`] refuses `n = 6`
+    /// with [`ConsensusError::NoQuorumIntersection`], so every set this type
+    /// can be constructed from satisfies
+    /// [`ValidatorSet::has_quorum_intersection`]. Operators should use
+    /// `n = 3f + 1`: 4, 7, 10, 13.
     pub fn quorum(&self) -> usize {
         self.fault_tolerance().saturating_mul(2).saturating_add(1)
     }
 
     /// True when any two quorums must share at least one validator, which is
     /// what makes two conflicting commits at one height impossible.
+    ///
+    /// [`ValidatorSet::new`] refuses any set for which this is false, so it is
+    /// an invariant of every constructed set rather than a question a caller
+    /// has to remember to ask. It stays public because the answer is what the
+    /// constructor's rejection *means*.
     pub fn has_quorum_intersection(&self) -> bool {
         self.quorum().saturating_mul(2) > self.ids.len()
     }

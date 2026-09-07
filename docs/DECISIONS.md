@@ -132,3 +132,60 @@ present in the first version of the interpreter, not added once a denial-of-serv
 Retrofitting a limit is how chains get halted: every historical block that violated the new limit
 becomes invalid, so the limit has to be soft-forked in at a height, and the pre-fork blocks stay
 expensive forever.
+
+---
+
+## D11 — The genesis commitment covers the fork schedule
+
+`genesis_commitment` hashes `bft_activation_height` and the ordered `bft_validators` list along with
+the monetary and difficulty parameters. Both are loaded per node from `--consensus-config`, and both
+decide *which engine validates every block* at and above the activation height; the validator order
+is consensus in its own right, because the proposer rotation and every commit signature index are
+positional.
+
+Before this, two nodes with different fork schedules computed the **same** genesis hash, synced
+normally, and discovered the disagreement at the activation height — by which point each had a
+branch the other rejects with `WrongEngine` and records as permanently `Invalid`. That is the same
+defect shape as a difficulty anchor that is not pinned identically everywhere: a consensus rule
+parameterised by a value nothing checks network-wide, with no detection until after the fork.
+
+The activation is encoded as a presence byte followed by the height rather than a sentinel, so
+`None` and `Some(u64::MAX)` are different chains. The validator list is length-prefixed and written
+in index order, so reordering, truncating or extending it moves the hash.
+
+**Cost, stated rather than hidden:** every published genesis hash changed. README.md and
+`docs/RUNNING.md` §4 carry the new values and `the_published_genesis_hashes_are_these` pins them. A
+node built before this change cannot peer with one built after it — deliberately, since the two
+disagree about what a network *is*. There is still no genesis exchange in the p2p handshake, so the
+mismatch surfaces as a failure to sync rather than as a handshake rejection; adding that exchange
+would make the failure louder and is left as follow-up work.
+
+---
+
+## D12 — Block size rule 1 measures the block without its seal
+
+SPEC §3.1 rule 1 and CONTRACT §8.1 rule 1 used to compare `Block::serialized_size()` — which
+includes `seal.borsh_size()` — against `max_block_size`. D2 puts the seal deliberately *outside*
+everything the block hash commits to, and `BftEngine::verify_commit` accepts any number of
+signatures from `quorum` to `n`. One block hash therefore had up to `n - quorum + 1` legal encodings,
+66 bytes apart, and whether it passed rule 1 depended on which one a node happened to receive: a
+relaying peer that re-encoded a block with two more (perfectly valid, publicly gossiped) precommit
+signatures could push a copy over the limit for its neighbours while the original stayed under it.
+Two honest nodes then disagree about one block hash, and the attacker needs no validator key.
+
+A consensus rule may not be a function of a value the block does not commit to. Rule 1 now measures
+`HEADER_SIZE + 4 + Σ tx.borsh_size()` — `Block::consensus_size()`, everything the merkle root and the
+header pin down — and the seal is bounded separately by its own rule: a certificate may not exceed
+`BlockSeal::max_data_len(n)` = `48 + 66·n` bytes, the largest a commit signed by every validator can
+encode to. Both are still context-free, both are checked in `check_block_sanity`, and the transaction
+budget no longer moves when a certificate does.
+
+The alternative — canonicalising every certificate to exactly the lowest `quorum` indices before
+relaying — was rejected: it makes the *wire* form of a block depend on a rule every relay must apply
+identically, and a single relay that skipped it would reintroduce the split.
+
+Consequence for the miner: `block_size_of` measures the same seal-free quantity, so a BFT template
+fills to `max_block_size` and the certificate the engine attaches afterwards does not overflow it.
+The old accounting reserved five bytes for an *empty* seal at every height, which undercounted a
+four-validator certificate by 246 bytes and would have halted the chain at the first full block after
+BFT activation.

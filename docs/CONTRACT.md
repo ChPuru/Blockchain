@@ -200,12 +200,17 @@ pub struct BlockHeader {
 pub const HEADER_SIZE: usize = 88;
 
 pub struct BlockSeal { pub engine: u8, pub data: Vec<u8> }
-impl BlockSeal { pub const POW: BlockSeal; pub const ENGINE_POW: u8 = 0; pub const ENGINE_BFT: u8 = 1; }
+impl BlockSeal {
+    pub const POW: BlockSeal; pub const ENGINE_POW: u8 = 0; pub const ENGINE_BFT: u8 = 1;
+    pub const BFT_COMMIT_FIXED: usize = 48; pub const BFT_COMMIT_PER_SIGNATURE: usize = 66;
+    pub const fn max_data_len(validators: usize) -> usize;   // 48 + 66 * n
+}
 
 pub struct Block { pub header: BlockHeader, pub txs: Vec<Transaction>, pub seal: BlockSeal }
 impl Block {
     pub fn coinbase(&self) -> Option<&Transaction>;    // txs[0] if it is_coinbase()
-    pub fn serialized_size(&self) -> usize;
+    pub fn serialized_size(&self) -> usize;            // size of borsh(self), seal included
+    pub fn consensus_size(&self) -> usize;             // header + count + txs, seal EXCLUDED
 }
 
 // ---- UTXO ----
@@ -398,8 +403,11 @@ pub struct ExecCtx<'a> {
     pub tx: &'a Transaction,
     pub input_index: usize,
     pub input_value: Amount,
+    pub input_height: Option<u64>,  // height of the block that created the coin being spent
+    pub input_mtp_s: Option<u64>,   // median time past, seconds, of that same block
     pub block_height: u64,
     pub block_mtp_s: u64,          // median time past, seconds — for CLTV against a timestamp
+    pub sighash_cache: Option<&'a SighashCache<'a>>,  // §5.5; one per transaction
     pub limits: ScriptLimits,
 }
 
@@ -425,6 +433,17 @@ stack of size ≠ 1 is a failure (Bitcoin's "clean stack" rule, made mandatory f
 
 **The interpreter must never panic on any input.** A `cargo-fuzz` target asserts this.
 
+`input_height` / `input_mtp_s` describe the **coin being spent**, not the block spending it, and
+they are what makes `OP_CHECKSEQUENCEVERIFY` a timelock rather than a comparison of two numbers the
+spender wrote (SPEC §4.4). `None` means "this caller cannot say how old the coin is", and a
+non-zero relative locktime then **fails closed** (`UnknownCoinHeight` / `UnknownCoinTime`) rather
+than passing unchecked. A validating caller — block application, mempool admission, template
+building — must fill `input_height` from the resolved `Coin::height`.
+
+`sighash_cache` is optional and changes no result, only cost: one `SighashCache` per transaction,
+shared by every input's `ExecCtx`, is what keeps validation linear (§5.5). A cache built for a
+different transaction is ignored rather than trusted.
+
 ### 5.5 Sighash — BIP-143 shape, over the frozen preimage below
 
 ```
@@ -445,6 +464,26 @@ sighash_preimage :=
 
 sighash := tagged_hash(TAG_SIGHASH, sighash_preimage)
 ```
+
+```rust
+/// The three transaction-wide mid-states, computed at most once each.
+/// Hold one per transaction and pass it to every input's ExecCtx: recomputing
+/// them per signature check makes validation quadratic in transaction size,
+/// which is the denial of service this preimage shape exists to remove.
+pub struct SighashCache<'a> { /* hash_prevouts, hash_sequences, hash_outputs(ALL) */ }
+impl<'a> SighashCache<'a> {
+    pub fn new(tx: &'a Transaction) -> Self;
+    pub fn tx(&self) -> &'a Transaction;
+    pub fn is_for(&self, tx: &Transaction) -> bool;   // pointer identity
+    pub fn preimage(&self, input_index: usize, script_code: &[u8], input_value: Amount,
+                    chain_id: ChainId, ty: SigHashType) -> Result<Vec<u8>, ScriptError>;
+    pub fn signature_hash(&self, input_index: usize, script_code: &[u8], input_value: Amount,
+                          chain_id: ChainId, ty: SigHashType) -> Result<Hash32, ScriptError>;
+}
+```
+
+The free `sighash_preimage` / `signature_hash` build a throwaway cache, so they are the convenient
+form and not the fast one. They produce byte-identical results.
 
 `SigHashType`: `ALL = 0x01`, `NONE = 0x02`, `SINGLE = 0x03`, flag `ANYONECANPAY = 0x80`.
 Any other value is invalid. `SINGLE` with `input_index >= outputs.len()` is an **error**, not
@@ -609,7 +648,12 @@ impl EngineRouter { pub fn engine_for_height(&self, height: u64) -> &dyn Consens
 ### 6.5 BFT (M9) — Tendermint-shaped, permissioned
 
 - Validator set is fixed in `ChainParams::bft_validators` (x-only BIP-340 keys), `n >= 4`,
-  `f = (n - 1) / 3`, quorum `2f + 1`.
+  `f = (n - 1) / 3`, quorum `2f + 1`, **and `2 * (2f + 1) > n`**. The last clause is quorum
+  intersection, which is the only reason a `2f+1` certificate means anything; with this `f` it
+  excludes exactly one size, `n = 6` (`f = 1`, quorum 3, and two disjoint quorums of 3 fill the
+  set — one Byzantine proposer commits two different blocks at one height). `ValidatorSet::new`
+  returns `ConsensusError::NoQuorumIntersection` for it, so it is a boot failure. Prefer
+  `n = 3f + 1`: 4, 7, 10, 13.
 - Round: **propose → prevote → precommit → commit**, with round-robin proposer
   `proposer(height, round) = validators[(height + round) % n]`.
 - Timeouts (`propose`, `prevote`, `precommit`) double each round: `base * 2^round`.
@@ -617,7 +661,13 @@ impl EngineRouter { pub fn engine_for_height(&self, height: u64) -> &dyn Consens
   different block if it sees a `2f+1` polka for that block at a round `> r`.
 - `BftCommit { height: u64, round: u32, block_hash: BlockHash, signatures: Vec<(u16, Signature)> }`
   where `u16` is the validator index. Signed message =
-  `tagged_hash(TAG_BFT_PRECOMMIT, borsh(VoteMsg{chain_id, height, round, block_hash}))`.
+  `tagged_hash(TAG_BFT_PRECOMMIT, borsh(VoteMsg{chain_id, height, round, block_hash}))`, and the
+  prevote is the same preimage under `TAG_BFT_PREVOTE`.
+- A **proposal** signs `tagged_hash(TAG_BFT_PROPOSAL, borsh(VoteMsg) || borsh(Option<u32> pol_round))`.
+  `pol_round` is inside the preimage because it selects which prevote rule a receiver runs: outside
+  it, any relay could rewrite the field on a genuine proposal and still have it verify, and the
+  first proposal seen for a round is the one that round is decided against. `VoteMsg` itself stays
+  frozen at 48 bytes; only the proposal digest is longer.
 - **Safety over liveness.** With `n = 4`, killing one validator continues; killing two **halts**.
   Halting is the correct behaviour and the README says so.
 
@@ -635,12 +685,22 @@ inside that same transaction**. Numeric keys are **big-endian**.
 | `height`   | `be_u64(height)` | `block_hash[32]`  — the **active** chain only |
 | `utxo`     | `borsh(OutPoint)` (36 B) | `borsh(Coin)` |
 | `undo`     | `block_hash[32]` | `borsh(UndoBlock)` |
-| `meta`     | `&str` | raw bytes (`tip`, `chain_id`, `schema_version`, `engine`) |
+| `meta`     | `&str` | raw bytes (`tip`, `chain_id`, `schema_version`, `engine`, `index_height`) |
 | `tx_index`* | `txid[32]` | `borsh(TxLocation{block_hash, index})` |
 | `addr_index`* | `addr_key[20 or 32] ‖ be_u64(height) ‖ be_u32(tx_idx)` | `txid[32]` |
 
 `*` The last two are the explorer's reverse index. They are **not consensus state**; they are built
 only when `StoreConfig::index_transactions` is on, and a node without them is fully valid.
+
+`index_transactions` is a **runtime** flag, so the same datadir can be written by a run that
+maintained the index and by a run that did not. `meta.index_height` (`be_u64`) records the height
+the index is actually complete to, written inside the same transaction as the block: a connect
+advances it, a disconnect lowers it, and any write made with the flag off removes it. A reader whose
+`index_height` does not equal the tip height gets `StorageError::IndexIncomplete` rather than an
+answer from tables that describe a chain that no longer exists; the cure is `chain reindex`. Opening
+with the flag on against a store whose index is not current clears the two tables back to genesis
+(so the replay has a contiguous base) rather than refusing — `chain reindex` opens the same store
+with the same flag, so a refusal could never be repaired.
 
 ```rust
 pub struct BlockIndexEntry {
@@ -680,6 +740,8 @@ impl Store {
     pub fn iter_utxos(&self) -> Result<impl Iterator<Item = Result<(OutPoint, Coin), StorageError>>, StorageError>;
     pub fn get_undo(&self, h: &BlockHash) -> Result<Option<UndoBlock>, StorageError>;
     pub fn tx_location(&self, txid: &Txid) -> Result<Option<TxLocation>, StorageError>;
+    /// How far `tx_index`/`addr_index` are built; `None` when they describe no block.
+    pub fn index_height(&self) -> Result<Option<u64>, StorageError>;
     pub fn address_history(&self, key: &[u8], from_height: u64, limit: usize)
         -> Result<Vec<(u64, Txid)>, StorageError>;
 
@@ -729,7 +791,10 @@ pub fn median_time_past(headers: &[BlockHeader]) -> u64;      // seconds; median
 
 ### 8.1 Block validation rules, in the order they are checked
 
-1. `block.serialized_size() <= params.max_block_size`.
+1. `block.consensus_size() <= params.max_block_size` — the block **without its seal** — and
+   `block.seal.data.len() <= BlockSeal::max_data_len(params.bft_validators.len())`. The seal is not
+   committed to by the block hash and legally varies between `quorum` and `n` signatures, so it is
+   bounded separately rather than counted against the transaction budget (DECISIONS D12).
 2. `!block.txs.is_empty()` and `block.txs[0].is_coinbase()` and no other tx is a coinbase.
 3. `compute_merkle_root(&block.txs) == header.merkle_root`.
 4. No duplicate txid within the block.
@@ -748,7 +813,12 @@ pub fn median_time_past(headers: &[BlockHeader]) -> u64;      // seconds; median
    - final-ness: a tx with `lock_time != 0` is final only if
      `lock_time < LOCKTIME_THRESHOLD ? lock_time <= height : lock_time <= mtp_s`, unless every
      input has `sequence == u32::MAX`.
-   - `script::verify` for every input, with `ExecCtx` filled from the resolved coin.
+   - relative locktime (BIP-68, SPEC §4.4): for every input whose `sequence` has bit 31 clear,
+     `ctx.height >= coin.height + (sequence & 0xffff)`. An input selecting the 512-second flavour
+     (bit 22 set, bit 31 clear) is rejected: the seam cannot see the median time past of the block
+     that created the coin, and an unenforceable timelock fails closed.
+   - `script::verify` for every input, with `ExecCtx` filled from the resolved coin — including
+     `input_height`, without which `OP_CHECKSEQUENCEVERIFY` compares only numbers the spender wrote.
    - mark inputs spent in the overlay, add outputs.
 8. Coinbase: exactly one input, `OutPoint::NULL`, `script_sig` between 2 and 100 bytes and
    **beginning with a minimally-encoded push of `ctx.height`** (BIP-34 style, so coinbase txids

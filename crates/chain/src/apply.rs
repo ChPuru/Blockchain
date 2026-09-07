@@ -39,15 +39,41 @@
 use ferrum_consensus::{
     ConsensusError, MIN_BLOCK_VERSION, Target, compact_to_target, hash_meets_target,
 };
+use ferrum_script::limits::{
+    SEQUENCE_LOCKTIME_DISABLE_FLAG, SEQUENCE_LOCKTIME_MASK, SEQUENCE_LOCKTIME_TYPE_FLAG,
+};
+use ferrum_script::sighash::SighashCache;
 use ferrum_script::{ExecCtx, ScriptLimits, verify};
 use ferrum_storage::{OverlayView, StateDiff, StateView, header_hash, txid};
-use ferrum_types::{Amount, Block, BlockHash, BlockSeal, Coin, OutPoint};
+use ferrum_types::{Amount, Block, BlockHash, BlockSeal, ChainParams, Coin, OutPoint};
 
 use crate::ctx::BlockCtx;
 use crate::error::ValidationError;
 use crate::validate::{
     check_block_sanity, check_coinbase_script_sig, check_coinbase_structure, is_final, total_output,
 };
+
+/// Bytes of the block-size budget that buy one signature verification.
+///
+/// Fifty, which is Bitcoin's `MAX_BLOCK_SIGOPS` ratio: 20 000 checks for a
+/// 1 MB block. The number is a *ratio* rather than a constant so that the
+/// budget moves with `max_block_size` instead of silently becoming either
+/// unreachable or binding when that parameter is retuned.
+pub const BLOCK_BYTES_PER_SIG_CHECK: usize = 50;
+
+/// How many signature verifications one block may demand under `params`.
+///
+/// `MAX_OPS` bounds a single input and `OP_CHECKMULTISIG` charges `1 + n`
+/// operations for up to `n` verifications, so one input can ask for roughly
+/// 190 of them. The expensive script sits in the `script_pubkey`, which is
+/// already in the UTXO set, so the *spending* input can be as small as 44
+/// bytes: without this budget there is no proportionality between the block
+/// space an attacker pays for and the verification work every node performs.
+#[must_use]
+pub fn max_block_sig_checks(params: &ChainParams) -> u64 {
+    let checks = params.max_block_size.checked_div(BLOCK_BYTES_PER_SIG_CHECK).unwrap_or(0);
+    u64::try_from(checks).unwrap_or(u64::MAX)
+}
 
 /// Validate `block` against `pre` and return the change it makes to the UTXO
 /// set.
@@ -61,7 +87,8 @@ use crate::validate::{
 /// 3. merkle root matches
 /// 4. no duplicate txid
 /// 5. every transaction passes §4.1 sanity
-/// 6. header: version, parentage, timestamp above the median, proof of work
+/// 6. header: version, parentage, target, proof of work, timestamp above the
+///    median
 /// 7. seal shape for the active engine
 /// 8. every non-coinbase transaction passes §4.2, in block order, against an
 ///    overlay — so a transaction may spend an output created by an **earlier**
@@ -69,7 +96,9 @@ use crate::validate::{
 /// 9. coinbase: `script_sig` is 2..=100 bytes and begins with a minimally
 ///    encoded push of the height (BIP-34), and its outputs claim no more than
 ///    `block_subsidy(height) + total_fees`
-/// 10. no output this block creates already exists in the UTXO set
+/// 10. no output this block creates already exists in the UTXO set — read
+///     against the pre-state, and last, so a block breaking this rule and the
+///     coinbase's value rule is rejected for the value rule
 ///
 /// # Errors
 ///
@@ -92,6 +121,8 @@ pub fn apply_block(
     // ---- SPEC §3.3 rule 12: contextual transaction validation ----------------
     let mut overlay = OverlayView::new(pre);
     let mut total_fees = Amount::ZERO;
+    let sig_check_budget = max_block_sig_checks(&ctx.params);
+    let mut sig_checks: u64 = 0;
 
     for (tx_index, tx) in block.txs.iter().enumerate().skip(1) {
         // §4.2.1 — resolve every input against the overlay. A coin spent by an
@@ -157,20 +188,55 @@ pub fn apply_block(
             return Err(ValidationError::NonFinalTransaction { tx_index, lock_time: tx.lock_time });
         }
 
+        // §4.4 — relative locktime (BIP-68), against the age of each coin.
+        for (input_index, (input, coin)) in tx.inputs.iter().zip(coins.iter()).enumerate() {
+            check_relative_lock(tx_index, input_index, input.sequence, coin.height, ctx)?;
+        }
+
         // §4.2.3 — scripts, with the spent coin's value and script in scope.
+        //
+        // One sighash cache per transaction, shared by every input: the
+        // prevout, sequence and output digests depend on the transaction and
+        // not on which input is being signed, so building it here is what
+        // makes validating an `n`-input transaction cost `O(n)` rather than
+        // `O(n²)` (CONTRACT §5.5).
+        let sighash_cache = SighashCache::new(tx);
         for (input_index, (input, coin)) in tx.inputs.iter().zip(coins.iter()).enumerate() {
             let exec = ExecCtx {
                 chain_id: ctx.params.chain_id,
                 tx,
                 input_index,
                 input_value: coin.value,
+                // The coin's age, for the BIP-68 half of
+                // `OP_CHECKSEQUENCEVERIFY`. The height is known exactly; the
+                // median time past of the block that created the coin is not
+                // reachable from this seam, so the 512-second flavour fails
+                // closed both here and in the interpreter (see
+                // `check_relative_lock`).
+                input_height: Some(coin.height),
+                input_mtp_s: None,
                 block_height: ctx.height,
                 block_mtp_s: ctx.median_time_past_s,
+                sighash_cache: Some(&sighash_cache),
                 limits: ScriptLimits::CONSENSUS,
             };
-            verify(&input.script_sig, &coin.script_pubkey, &exec).map_err(|source| {
-                ValidationError::ScriptVerification { tx_index, input_index, source }
-            })?;
+            let stats =
+                verify(&input.script_sig, &coin.script_pubkey, &exec).map_err(|source| {
+                    ValidationError::ScriptVerification { tx_index, input_index, source }
+                })?;
+
+            // Bill the block for the work that input just cost, and stop the
+            // moment the budget is passed rather than after validating the
+            // rest — the whole point of the rule is not to do the work.
+            sig_checks = sig_checks
+                .checked_add(u64::from(stats.sig_checks))
+                .ok_or(ValidationError::Arithmetic("block signature checks"))?;
+            if sig_checks > sig_check_budget {
+                return Err(ValidationError::SigCheckBudgetExceeded {
+                    used: sig_checks,
+                    budget: sig_check_budget,
+                });
+            }
         }
 
         // §4.2.4 — mark spent, then publish this transaction's outputs, so the
@@ -185,17 +251,12 @@ pub fn apply_block(
         for (vout, out) in tx.outputs.iter().enumerate() {
             let index =
                 u32::try_from(vout).map_err(|_| ValidationError::Arithmetic("output index"))?;
-            let out_point = OutPoint::new(id, index);
-            // §3.3 rule 15 — no created output may already exist.
-            if overlay.has_coin(&out_point).map_err(|e| ValidationError::view(&e))? {
-                return Err(ValidationError::DuplicateOutPoint { out_point });
-            }
-            overlay.add(out_point, Coin::new(out.clone(), ctx.height, false));
+            overlay.add(OutPoint::new(id, index), Coin::new(out.clone(), ctx.height, false));
         }
     }
 
     // ---- SPEC §3.3 rules 13 and 14: the coinbase ----------------------------
-    let created_by_coinbase = check_coinbase(block, ctx, total_fees, &overlay)?;
+    let created_by_coinbase = check_coinbase(block, ctx, total_fees)?;
 
     // The diff's `created` must be in `(tx index, vout)` order, and the
     // coinbase is transaction zero — so its outputs go in front of everything
@@ -204,14 +265,120 @@ pub fn apply_block(
     let mut created = created_by_coinbase;
     created.extend(diff.created);
     diff.created = created;
+
+    // ---- SPEC §3.3 rule 15: no created output already exists ----------------
+    check_no_created_outpoint_exists(pre, &diff.created)?;
+
     Ok(diff)
+}
+
+/// SPEC §3.3 rule 15 — no output this block creates may already exist **in the
+/// UTXO set**.
+///
+/// Two words in that sentence are load-bearing, and both were wrong when this
+/// check lived inside the transaction loop.
+///
+/// *In the UTXO set*: the comparison is against `pre`, the parent's state, not
+/// against the overlay this block has been mutating. `OverlayView::has_coin`
+/// answers `false` for anything the block already spent, so an overlay-based
+/// check is defeated by spending the colliding coin earlier in the same block
+/// — and `Store::connect_block` would then insert the new coin at that
+/// outpoint and immediately remove it again, destroying the block's own
+/// output. Rule 15 exists as defence in depth on the inflation path, and a
+/// backstop that the attack can switch off is not one.
+///
+/// *Last*: SPEC §3.3 numbers it 15, after the coinbase's value (13) and BIP-34
+/// (14), and CONTRACT §8.1 lists it ninth and last. A block that breaks rule 13
+/// and rule 15 together must be rejected for rule 13. `created` arrives in
+/// `(tx index, vout)` order, so the first collision reported is the earliest.
+///
+/// Nothing checks `created` against *itself*: two identical outpoints inside
+/// one block would need two identical txids, which rule 4 already rejects.
+fn check_no_created_outpoint_exists(
+    pre: &dyn StateView,
+    created: &[(OutPoint, Coin)],
+) -> Result<(), ValidationError> {
+    for (out_point, _) in created {
+        if pre.has_coin(out_point).map_err(|e| ValidationError::view(&e))? {
+            return Err(ValidationError::DuplicateOutPoint { out_point: *out_point });
+        }
+    }
+    Ok(())
+}
+
+/// SPEC §4.4 — the chain half of BIP-68, for one resolved input.
+///
+/// `OP_CHECKSEQUENCEVERIFY` compares its operand against
+/// `tx.inputs[i].sequence`, and nothing else. That field is written by the
+/// spender, so on its own it proves nothing: the script half of BIP-112 is a
+/// timelock only because this rule separately requires the spent coin to be
+/// old enough for the `sequence` it is spent with. Without it, a
+/// `<n> OP_CHECKSEQUENCEVERIFY OP_DROP …` output is spendable the block after
+/// it is created by anyone who can satisfy the rest of the script.
+///
+/// The boundary is `spend_height >= coin_height + n`, i.e. a lock of `n`
+/// blocks requires the coin to be at least `n` blocks deep, and `n == 0` locks
+/// nothing. A coin created by an earlier transaction in *this* block has
+/// `coin.height == ctx.height`, so any `n >= 1` rejects it, which is correct.
+///
+/// # The 512-second flavour
+///
+/// Bit 22 selects a relative lock counted in 512-second units. Evaluating it
+/// needs the median time past of the block that *created* the coin;
+/// [`BlockCtx`] carries only the parent's median and [`Coin`] carries only a
+/// height, so the seam cannot compute it. An unenforceable timelock must fail
+/// closed — accepting the input would mean the lock silently is not a lock —
+/// so such an input is rejected outright. Lifting that needs the creating
+/// block's median in `BlockCtx`; see SPEC §4.4.
+fn check_relative_lock(
+    tx_index: usize,
+    input_index: usize,
+    sequence: u32,
+    coin_height: u64,
+    ctx: &BlockCtx,
+) -> Result<(), ValidationError> {
+    // Bit 31: this input opts out of relative locktime entirely. `u32::MAX`
+    // and the wallet's `0xffff_fffe` both land here.
+    if sequence & SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
+        return Ok(());
+    }
+    if sequence & SEQUENCE_LOCKTIME_TYPE_FLAG != 0 {
+        return Err(ValidationError::UnsupportedRelativeTimeLock {
+            tx_index,
+            input_index,
+            sequence,
+        });
+    }
+    let required = sequence & SEQUENCE_LOCKTIME_MASK;
+    let spendable_at = coin_height
+        .checked_add(u64::from(required))
+        .ok_or(ValidationError::Arithmetic("relative locktime height"))?;
+    if ctx.height < spendable_at {
+        return Err(ValidationError::UnsatisfiedRelativeLock {
+            tx_index,
+            input_index,
+            sequence,
+            required,
+            coin_height,
+            spend_height: ctx.height,
+        });
+    }
+    Ok(())
 }
 
 /// SPEC §3.2 — the header rules that are computable without the header chain.
 ///
+/// The order is normative and is SPEC §3.2's own: version, parentage, then
+/// rule 7's target, then rule 8's proof of work, then rule 9's median-time-past
+/// bound. A block that breaks two of them at once is rejected for the *first*,
+/// and SPEC §3.4 makes that variant observable — so this order is what
+/// `PowEngine::validate_header`, CONTRACT §8.1 rule 5 and the reference
+/// executor also use.
+///
 /// Genesis is exempt from proof-of-work validation against a parent it does
 /// not have, from the difficulty transition, and from the median-time-past
-/// bound (SPEC §2). It is *not* exempt from having a zero `prev_hash`.
+/// bound (SPEC §2). It is *not* exempt from the version rule, which is why
+/// that one is read before the exemption.
 fn check_header(block: &Block, ctx: &BlockCtx) -> Result<(), ValidationError> {
     let header = &block.header;
 
@@ -237,6 +404,35 @@ fn check_header(block: &Block, ctx: &BlockCtx) -> Result<(), ValidationError> {
         }));
     }
 
+    // Rules 7 and 8. `bits` is a hashed header field that every node must
+    // agree on, so it is expanded and range-checked at *every* height under
+    // *every* engine: a target that does not expand, is zero, or is easier
+    // than `pow_limit` is malformed whoever sealed the block. Only the hash
+    // comparison is proof of work's own business (SPEC §3.2 rule 8, "PoW
+    // engine only").
+    let target = compact_to_target(header.bits).map_err(ValidationError::Header)?;
+    if target.is_zero() {
+        return Err(ValidationError::Header(ConsensusError::ZeroTarget));
+    }
+    let limit = Target::from_be_bytes(&ctx.params.pow_limit);
+    if target > limit {
+        return Err(ValidationError::Header(ConsensusError::TargetAbovePowLimit {
+            actual: target,
+            limit,
+        }));
+    }
+    if ctx.engine_id == BlockSeal::ENGINE_POW {
+        let hash = header_hash(header);
+        if !hash_meets_target(&hash, target) {
+            return Err(ValidationError::Header(ConsensusError::InsufficientWork { hash, target }));
+        }
+    }
+
+    // Rule 9, and it comes *after* the work rules: SPEC §3.2 numbers it 9,
+    // CONTRACT §8.1 rule 5 lists it last of the three, `PowEngine::validate_header`
+    // checks it last and so does the reference executor. A block that breaks
+    // both must be rejected for the same reason by all four.
+    //
     // Strictly greater: equality is rejected, which is what stops a miner from
     // freezing the clock across a whole median window.
     let median_time_past_ms = ctx.median_time_past_ms();
@@ -245,24 +441,6 @@ fn check_header(block: &Block, ctx: &BlockCtx) -> Result<(), ValidationError> {
             timestamp_ms: header.timestamp_ms,
             median_time_past_ms,
         }));
-    }
-
-    if ctx.engine_id == BlockSeal::ENGINE_POW {
-        let target = compact_to_target(header.bits).map_err(ValidationError::Header)?;
-        if target.is_zero() {
-            return Err(ValidationError::Header(ConsensusError::ZeroTarget));
-        }
-        let limit = Target::from_be_bytes(&ctx.params.pow_limit);
-        if target > limit {
-            return Err(ValidationError::Header(ConsensusError::TargetAbovePowLimit {
-                actual: target,
-                limit,
-            }));
-        }
-        let hash = header_hash(header);
-        if !hash_meets_target(&hash, target) {
-            return Err(ValidationError::Header(ConsensusError::InsufficientWork { hash, target }));
-        }
     }
 
     Ok(())
@@ -290,17 +468,18 @@ fn check_seal_shape(block: &Block, ctx: &BlockCtx) -> Result<(), ValidationError
     Ok(())
 }
 
-/// SPEC §3.3 rules 13 and 14, plus rule 15 for the coinbase's own outputs.
+/// SPEC §3.3 rules 13 and 14.
 ///
 /// Returns the coins the coinbase creates, in `vout` order. They are *not*
-/// added to the overlay: a coinbase output is unspendable for
-/// `coinbase_maturity` blocks, so nothing later in this block could legally
-/// reach it.
+/// added to the overlay: SPEC §3.3 rule 12 says the coinbase's outputs are
+/// outside the overlay its own block is validated against, so a transaction
+/// naming one of them is rejected with `MissingInput` at every
+/// `coinbase_maturity`. Rule 15 is applied to them by the caller, together
+/// with every other created outpoint and after this function's value rule.
 fn check_coinbase(
     block: &Block,
     ctx: &BlockCtx,
     total_fees: Amount,
-    overlay: &OverlayView<'_>,
 ) -> Result<Vec<(OutPoint, Coin)>, ValidationError> {
     let coinbase = block.txs.first().ok_or(ValidationError::EmptyBlock)?;
     check_coinbase_structure(coinbase)?;
@@ -325,11 +504,7 @@ fn check_coinbase(
     let mut created = Vec::with_capacity(coinbase.outputs.len());
     for (vout, out) in coinbase.outputs.iter().enumerate() {
         let index = u32::try_from(vout).map_err(|_| ValidationError::Arithmetic("output index"))?;
-        let out_point = OutPoint::new(id, index);
-        if overlay.has_coin(&out_point).map_err(|e| ValidationError::view(&e))? {
-            return Err(ValidationError::DuplicateOutPoint { out_point });
-        }
-        created.push((out_point, Coin::new(out.clone(), ctx.height, true)));
+        created.push((OutPoint::new(id, index), Coin::new(out.clone(), ctx.height, true)));
     }
     Ok(created)
 }

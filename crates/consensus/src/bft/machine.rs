@@ -47,6 +47,26 @@ use crate::bft::vote::{BftCommit, NIL_BLOCK, Proposal, SignedVote, VoteKind, Vot
 /// livelocks inside one event handler is a denial of service.
 const MAX_ADVANCE_PASSES: usize = 16;
 
+/// How far above the current round a message may name a round and still be
+/// buffered.
+///
+/// A vote's `round` is unconstrained attacker input, and every round accepted
+/// becomes a live `RoundVotes` bucket that `decided()` and `skip_round()`
+/// rescan on every later event. Without a bound, one Byzantine validator can
+/// sign a valid nil precommit at each of a hundred thousand rounds — ~11 MB of
+/// traffic that is indistinguishable from honest traffic — and leave every
+/// node, validator or not, holding that many allocations and paying `O(R)` per
+/// event to walk them. That is resource exhaustion inside the stated threat
+/// model, where the promise is that the chain *halts*, not that nodes die.
+///
+/// A window is all rule 12 needs: `skip_round` only ever jumps to the **lowest**
+/// round above the current one that `f+1` validators are in, so a node can be
+/// caught up in one step from anywhere inside the window. The window is wide
+/// because timeouts double per round: reaching round 64 requires the network to
+/// have been unable to decide for `base * 2^64` milliseconds, which is longer
+/// than the chain will exist. Nothing legitimate is ever refused by it.
+pub const MAX_ROUND_LOOKAHEAD: u32 = 64;
+
 /// One validator's Tendermint round machine.
 #[derive(Debug)]
 pub struct BftMachine {
@@ -225,6 +245,10 @@ impl BftMachine {
             self.ignored = self.ignored.saturating_add(1);
             return;
         }
+        if !self.round_in_window(proposal.round) {
+            self.ignored = self.ignored.saturating_add(1);
+            return;
+        }
         if proposal.proposer != self.validators.proposer_index(proposal.height, proposal.round) {
             self.ignored = self.ignored.saturating_add(1);
             return;
@@ -236,10 +260,14 @@ impl BftMachine {
 
         match self.proposals.entry(proposal.round) {
             Entry::Occupied(entry) => {
-                if entry.get().block_hash != proposal.block_hash {
-                    // Two different proposals in one round from one proposer.
-                    // Keep the first: a proposer must not be able to move a
-                    // round by re-proposing after validators have prevoted.
+                let seen = entry.get();
+                if (seen.block_hash, seen.pol_round) != (proposal.block_hash, proposal.pol_round) {
+                    // Two contradicting proposals in one round from one
+                    // proposer. Both halves are signed, so a differing
+                    // `pol_round` is as much a contradiction as a differing
+                    // block: it changes which rule every receiver runs. Keep
+                    // the first — a proposer must not be able to move a round
+                    // by re-proposing after validators have prevoted.
                     self.proposal_equivocators.insert(proposal.proposer);
                 }
                 self.ignored = self.ignored.saturating_add(1);
@@ -257,6 +285,10 @@ impl BftMachine {
             || signed.vote.chain_id != self.chain_id
             || signed.vote.height != self.state.height
         {
+            self.ignored = self.ignored.saturating_add(1);
+            return;
+        }
+        if !self.round_in_window(signed.vote.round) {
             self.ignored = self.ignored.saturating_add(1);
             return;
         }
@@ -503,6 +535,19 @@ impl BftMachine {
     }
 
     // -------------------------------------------------------------- helpers
+
+    /// Whether a message naming `round` is close enough to the current round
+    /// to be worth buffering.
+    ///
+    /// Rounds below the current one are kept: rule 3 reads `polka(vr, ..)` for
+    /// `vr < round`, and rule 11 decides off a precommit quorum from *any*
+    /// round, including one this node has already left. Those are bounded by
+    /// real progress. Only the unbounded direction — arbitrarily far ahead —
+    /// is refused, and [`MAX_ROUND_LOOKAHEAD`] is far past any round a live
+    /// network reaches.
+    fn round_in_window(&self, round: u32) -> bool {
+        round <= self.state.round.saturating_add(MAX_ROUND_LOOKAHEAD)
+    }
 
     /// Arm a timer once. Returns whether it was newly armed.
     fn schedule(&mut self, timeout: Timeout, out: &mut Vec<BftAction>) -> bool {

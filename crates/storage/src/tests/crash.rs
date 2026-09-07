@@ -12,7 +12,24 @@
 //! chain. Second, the interesting case: perform every write a block implies
 //! and then *fail to commit*, which is what a power cut between the first page
 //! write and `fsync` looks like. The reopened store must show no trace of that
-//! block — not a stray coin, not a height entry, and above all not a tip.
+//! block — not a stray coin, not a height entry, not an index row, and above
+//! all not a tip.
+//!
+//! # The crash is injected into `connect_block` itself
+//!
+//! [`Store::connect_block_then_crash`] arms a hook inside
+//! [`crate::Store::connect_block`] and then calls it; it does not re-implement
+//! the writes. A hand-copied twin would only ever prove that redb rolls back
+//! *the twin*, and a twin drifts: the one this replaced wrote neither the
+//! transaction index nor `meta.engine`, so a `connect_block` that had started
+//! committing in two transactions — block, undo and height first, UTXO and tip
+//! second — would have left a store whose tip lagged its UTXO set while every
+//! round here still passed.
+//!
+//! For the same reason half the rounds run with the reverse index on. The
+//! index writes (`tx_index`, `addr_index` and `meta.index_height`) happen only
+//! in that mode, and a crash has to leave no trace of them either — which is
+//! also the only crash coverage the `--index` write path gets.
 
 use std::collections::BTreeMap;
 
@@ -20,7 +37,17 @@ use ferrum_types::{Coin, OutPoint};
 use tempfile::TempDir;
 
 use crate::store::{Store, StoreConfig};
+use crate::tables::txid;
 use crate::tests::fixtures::{Built, ChainBuilder};
+
+/// The configuration round `round` opens its store with.
+///
+/// Odd rounds carry the reverse index, so the rounds that also crash
+/// (`round % 3 == 2`) cover both write paths: 5, 11, 17 … are indexed *and*
+/// interrupted.
+fn config_for(round: usize) -> StoreConfig {
+    if round % 2 == 1 { StoreConfig::indexed() } else { StoreConfig::default() }
+}
 
 /// The UTXO set that connecting `built[..n]` must produce.
 fn expected_utxo(built: &[Built]) -> BTreeMap<OutPoint, Coin> {
@@ -73,6 +100,19 @@ fn assert_consistent(store: &Store, built: &[Built], n: usize) {
         store.state_root().unwrap(),
         crate::state_root::state_root_of(expected.iter()).unwrap()
     );
+
+    // On an indexed store the reverse index is part of the same transaction,
+    // so it describes the same prefix: `index_height` tracks the tip and every
+    // transaction of every applied block is locatable.
+    if store.is_indexed() {
+        assert_eq!(store.index_height().unwrap(), applied.last().map(|b| b.height));
+        for blk in applied {
+            for (i, tx) in blk.block.txs.iter().enumerate() {
+                let loc = store.tx_location(&txid(tx)).unwrap().expect("an indexed transaction");
+                assert_eq!((loc.block_hash, loc.index), (blk.hash, i as u32));
+            }
+        }
+    }
 }
 
 #[test]
@@ -83,6 +123,7 @@ fn fifty_interrupted_restarts_all_come_back_consistent() {
     for round in 0..ROUNDS {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("ferrum.redb");
+        let cfg = config_for(round);
 
         let mut builder = ChainBuilder::new();
         let built = builder.build(CHAIN);
@@ -90,7 +131,7 @@ fn fifty_interrupted_restarts_all_come_back_consistent() {
         let n = round % (CHAIN + 1);
 
         {
-            let store = Store::open(&path, StoreConfig::default()).unwrap();
+            let store = Store::open(&path, cfg.clone()).unwrap();
             for blk in &built[..n] {
                 store
                     .connect_block(&blk.hash, blk.height, &blk.entry, &blk.diff, &blk.block)
@@ -114,7 +155,7 @@ fn fifty_interrupted_restarts_all_come_back_consistent() {
             // No flush, no close: the `Store` is simply dropped.
         }
 
-        let reopened = Store::open(&path, StoreConfig::default()).unwrap();
+        let reopened = Store::open(&path, cfg).unwrap();
         assert_consistent(&reopened, &built, n);
 
         // The uncommitted block left nothing at all behind.
@@ -125,6 +166,16 @@ fn fifty_interrupted_restarts_all_come_back_consistent() {
             assert_eq!(reopened.hash_at_height(ghost.height).unwrap(), None, "round {round}");
             for (op, _) in &ghost.diff.created {
                 assert_eq!(reopened.get_coin(op).unwrap(), None, "round {round}");
+            }
+            // Nor in the tables only the indexed path writes.
+            if reopened.is_indexed() {
+                for tx in &ghost.block.txs {
+                    assert_eq!(
+                        reopened.tx_location(&txid(tx)).unwrap(),
+                        None,
+                        "round {round}: an aborted block left an index row"
+                    );
+                }
             }
         }
 
@@ -146,32 +197,54 @@ fn an_uncommitted_block_never_moves_the_tip() {
     let mut builder = ChainBuilder::new();
     let built = builder.build(5);
 
-    let store = Store::open(&path, StoreConfig::default()).unwrap();
+    // Indexed: this is the configuration a node run with `--index` uses, and
+    // it is the one whose write sequence is longest.
+    let store = Store::open(&path, StoreConfig::indexed()).unwrap();
     for blk in &built[..3] {
         store.connect_block(&blk.hash, blk.height, &blk.entry, &blk.diff, &blk.block).unwrap();
     }
     let before = store.utxo_snapshot().unwrap();
     let tip = store.tip().unwrap();
+    let engine = store.engine().unwrap();
+
+    // Give the block that will not commit a different seal engine, so
+    // `meta.engine` — a write the old hand-copied crash twin did not make at
+    // all — has an observable value to leak if it ever escapes the aborted
+    // transaction.
+    let mut ghost = built[3].clone();
+    ghost.entry.seal_engine = 1;
+    assert_ne!(Some(ghost.entry.seal_engine), engine, "the ghost must differ from the tip");
 
     store
         .connect_block_then_crash(
-            &built[3].hash,
-            built[3].height,
-            &built[3].entry,
-            &built[3].diff,
-            &built[3].block,
+            &ghost.hash,
+            ghost.height,
+            &ghost.entry,
+            &ghost.diff,
+            &ghost.block,
         )
         .unwrap();
 
     // Even without reopening, the aborted transaction is invisible.
     assert_eq!(store.tip().unwrap(), tip);
     assert_eq!(store.utxo_snapshot().unwrap(), before);
+    assert_eq!(store.engine().unwrap(), engine);
+    assert_eq!(store.index_height().unwrap(), Some(2));
+    for tx in &ghost.block.txs {
+        assert_eq!(store.tx_location(&txid(tx)).unwrap(), None);
+    }
     drop(store);
 
-    let reopened = Store::open(&path, StoreConfig::default()).unwrap();
+    let reopened = Store::open(&path, StoreConfig::indexed()).unwrap();
     assert_eq!(reopened.tip().unwrap(), tip);
     assert_eq!(reopened.utxo_snapshot().unwrap(), before);
+    assert_eq!(reopened.engine().unwrap(), engine, "the aborted block's engine survived");
     assert_consistent(&reopened, &built, 3);
+
+    // And the interrupted block connects normally afterwards.
+    let next = &built[3];
+    reopened.connect_block(&next.hash, next.height, &next.entry, &next.diff, &next.block).unwrap();
+    assert_consistent(&reopened, &built, 4);
 }
 
 #[test]

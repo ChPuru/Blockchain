@@ -25,15 +25,21 @@ use std::collections::BTreeMap;
 use ferrum_chain::{BlockCtx, ValidationError, apply_block};
 use ferrum_sim::chain_builder::{BlockPlan, ChainBuilder, TxPlan};
 use ferrum_sim::mutate::invalid_variants;
-use ferrum_sim::{Lock, SimError, XorShift64, apply_block_reference};
+use ferrum_sim::{Lock, SimError, XorShift64, apply_block_reference, rule_name};
 use ferrum_storage::{MapView, StateDiff};
-use ferrum_types::{Amount, Block, Coin, Hash32, OutPoint, Transaction};
+use ferrum_types::{Amount, Block, BlockSeal, Coin, CompactTarget, Hash32, OutPoint, Transaction};
 
 /// How many blocks the main differential sweep covers.
 ///
 /// Past `coinbase_maturity` by a wide margin, so the tail of the run is real
 /// spending rather than a hundred empty blocks.
 const BLOCKS: usize = 320;
+
+/// The height the BFT sweep forks at.
+///
+/// Past `coinbase_maturity` so that both sides of the fork carry real spends
+/// rather than empty blocks.
+const BFT_ACTIVATION: u64 = 107;
 
 /// The height at which the sweep starts building invalid variants.
 ///
@@ -181,13 +187,25 @@ fn the_two_executors_agree_on_every_block() {
         if height >= MUTATION_START {
             for mutation in invalid_variants(&mut chain, &ctx).unwrap() {
                 let verdict = agree(&pre, &mutation.block, &ctx, mutation.name);
-                assert!(
-                    verdict.is_err(),
-                    "a block that breaks '{}' was accepted at height {height}",
-                    mutation.name
-                );
-                if let Err(e) = verdict {
-                    variants_seen.insert(variant_name(&e).to_owned());
+                match verdict {
+                    // Both executors agreeing on *a* rejection is not enough:
+                    // a fixture that drifted into breaking a different rule
+                    // would still agree, still be an error, and still count
+                    // towards the coverage floor, while the rule it was
+                    // written for stopped being tested (SPEC §3.4).
+                    Err(e) => {
+                        assert_eq!(
+                            rule_name(&e),
+                            mutation.expected,
+                            "'{}' broke the wrong rule at height {height}",
+                            mutation.name
+                        );
+                        variants_seen.insert(mutation.expected.to_owned());
+                    }
+                    Ok(_) => panic!(
+                        "a block that breaks '{}' was accepted at height {height}",
+                        mutation.name
+                    ),
                 }
                 invalid_blocks += 1;
             }
@@ -207,48 +225,22 @@ fn the_two_executors_agree_on_every_block() {
 
     assert_eq!(valid_blocks, BLOCKS - 1);
     assert!(invalid_blocks > 200, "expected a broad invalid sweep, saw {invalid_blocks}");
+    // 15 was the old floor, and it was reachable while every header and seal
+    // rule shared two buckets. `rule_name` names the inner `ConsensusError`,
+    // so this counts distinct *rules*.
     assert!(
-        variants_seen.len() >= 15,
+        variants_seen.len() >= 24,
         "the sweep must reach many distinct rules, saw {variants_seen:?}"
     );
-}
-
-/// The name of a [`ValidationError`] variant, for coverage bookkeeping.
-fn variant_name(e: &ValidationError) -> &'static str {
-    match e {
-        ValidationError::BlockTooLarge { .. } => "BlockTooLarge",
-        ValidationError::EmptyBlock => "EmptyBlock",
-        ValidationError::MissingCoinbase => "MissingCoinbase",
-        ValidationError::MultipleCoinbases { .. } => "MultipleCoinbases",
-        ValidationError::MerkleRootMismatch { .. } => "MerkleRootMismatch",
-        ValidationError::DuplicateTransaction { .. } => "DuplicateTransaction",
-        ValidationError::NoInputs => "NoInputs",
-        ValidationError::NoOutputs => "NoOutputs",
-        ValidationError::OutputValueOutOfRange { .. } => "OutputValueOutOfRange",
-        ValidationError::OutputSumOverflow => "OutputSumOverflow",
-        ValidationError::DuplicateInput { .. } => "DuplicateInput",
-        ValidationError::ScriptTooLarge { .. } => "ScriptTooLarge",
-        ValidationError::CoinbaseInputCount { .. } => "CoinbaseInputCount",
-        ValidationError::CoinbaseInputNotNull => "CoinbaseInputNotNull",
-        ValidationError::NullInput { .. } => "NullInput",
-        ValidationError::Header(_) => "Header",
-        ValidationError::Seal(_) => "Seal",
-        ValidationError::MissingInput { .. } => "MissingInput",
-        ValidationError::ImmatureCoinbaseSpend { .. } => "ImmatureCoinbaseSpend",
-        ValidationError::InputSumOverflow { .. } => "InputSumOverflow",
-        ValidationError::InsufficientInputValue { .. } => "InsufficientInputValue",
-        ValidationError::FeeOverflow => "FeeOverflow",
-        ValidationError::NonFinalTransaction { .. } => "NonFinalTransaction",
-        ValidationError::ScriptVerification { .. } => "ScriptVerification",
-        ValidationError::CoinbaseScriptSigLength { .. } => "CoinbaseScriptSigLength",
-        ValidationError::CoinbaseMissingHeightPush => "CoinbaseMissingHeightPush",
-        ValidationError::CoinbaseHeightMismatch { .. } => "CoinbaseHeightMismatch",
-        ValidationError::CoinbaseOverpayment { .. } => "CoinbaseOverpayment",
-        ValidationError::CoinbaseAllowanceOverflow => "CoinbaseAllowanceOverflow",
-        ValidationError::DuplicateOutPoint { .. } => "DuplicateOutPoint",
-        ValidationError::View { .. } => "View",
-        ValidationError::Arithmetic(_) => "Arithmetic",
-        _ => "unknown",
+    for named in [
+        "Header::BadVersion",
+        "Header::WrongParent",
+        "Header::TimestampTooOld",
+        "Header::InsufficientWork",
+        "Seal::NonEmptyPowSeal",
+        "Seal::WrongEngine",
+    ] {
+        assert!(variants_seen.contains(named), "the sweep never reached {named}");
     }
 }
 
@@ -368,6 +360,157 @@ fn the_two_executors_agree_on_the_order_rules_are_checked_in() {
         matches!(verdict, Err(ValidationError::InsufficientInputValue { .. })),
         "got {verdict:?}"
     );
+}
+
+/// SPEC §3.3 rule 12 validates every non-coinbase transaction against an
+/// overlay of the UTXO set **at the parent**. The coinbase is not in that
+/// overlay: its outputs join the UTXO set when the block is connected.
+///
+/// The distinction is invisible at any positive `coinbase_maturity` if the two
+/// executors are only asked "valid or not" — the spend is rejected either way,
+/// as `MissingInput` or as `ImmatureCoinbaseSpend`. At `coinbase_maturity = 0`
+/// it is the whole verdict: an executor that publishes the coinbase's outputs
+/// into the block's own overlay *accepts* the block. Both maturities are
+/// asserted here for that reason.
+#[test]
+fn a_transaction_cannot_spend_the_coinbase_of_its_own_block() {
+    for maturity in [ferrum_sim::sim_params().coinbase_maturity, 1, 0] {
+        let mut params = ferrum_sim::sim_params();
+        params.coinbase_maturity = maturity;
+        let mut chain = ChainBuilder::new(params, 0x0c0b_a5e0_0000_0001).unwrap();
+        chain.advance(6).unwrap();
+        let ctx = chain.next_ctx().unwrap();
+        let pre = chain.utxo().clone();
+        let block =
+            ferrum_sim::mutate::spend_of_the_blocks_own_coinbase(&mut chain, &ctx).unwrap();
+        let verdict = agree(&pre, &block, &ctx, "a spend of the block's own coinbase");
+        assert!(
+            matches!(verdict, Err(ValidationError::MissingInput { tx_index: 1, .. })),
+            "coinbase_maturity {maturity}: got {verdict:?}"
+        );
+    }
+}
+
+/// The same sweep, run across a PoW→BFT fork.
+///
+/// SPEC §9.3 promises "a test asserts height `h-1` validates under PoW and
+/// height `h` under BFT". Until this test existed the promise was kept only at
+/// the *engine* level (`crates/consensus/src/bft/tests/fork.rs`): every
+/// `BlockCtx` the simulator ever built had `engine_id == ENGINE_POW`, because
+/// `sim_params` leaves `bft_activation_height` unset — so the BFT arm of
+/// `apply_block`, which gates the entire target computation, had no
+/// differential coverage at all.
+#[test]
+fn the_two_executors_agree_across_the_pow_to_bft_fork() {
+    let mut chain = ChainBuilder::devnet_bft(0xbf70_0000_0000_0001, BFT_ACTIVATION).unwrap();
+    let mut rng = XorShift64::new(0xbf70_0000_0000_0002);
+    chain.advance(usize::try_from(BFT_ACTIVATION.saturating_sub(6)).unwrap()).unwrap();
+
+    let mut engines: std::collections::BTreeSet<u8> = std::collections::BTreeSet::new();
+    let mut rules: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
+    let mut sealed_bft = 0usize;
+
+    while chain.height() < BFT_ACTIVATION.saturating_add(5) {
+        let height = chain.height().saturating_add(1);
+        let ctx = chain.next_ctx().unwrap();
+        let pre = chain.utxo().clone();
+        assert_eq!(
+            ctx.engine_id,
+            if height >= BFT_ACTIVATION { BlockSeal::ENGINE_BFT } else { BlockSeal::ENGINE_POW },
+            "the fork is at {BFT_ACTIVATION}, height {height}"
+        );
+        engines.insert(ctx.engine_id);
+
+        for mutation in invalid_variants(&mut chain, &ctx).unwrap() {
+            match agree(&pre, &mutation.block, &ctx, mutation.name) {
+                Err(e) => {
+                    assert_eq!(
+                        rule_name(&e),
+                        mutation.expected,
+                        "'{}' broke the wrong rule at height {height}",
+                        mutation.name
+                    );
+                    rules.insert(mutation.expected);
+                }
+                Ok(_) => panic!(
+                    "a block that breaks '{}' was accepted at height {height}",
+                    mutation.name
+                ),
+            }
+        }
+
+        let txs = workload(&mut chain, &mut rng, height).unwrap();
+        let block = chain.build_block(&BlockPlan::with_txs(txs)).unwrap();
+        agree(&pre, &block, &ctx, "the honest block").expect("honest block must apply");
+        if block.seal.engine == BlockSeal::ENGINE_BFT {
+            sealed_bft = sealed_bft.saturating_add(1);
+        }
+        chain.connect(&block);
+    }
+
+    assert_eq!(engines.len(), 2, "the sweep must cross the fork, saw {engines:?}");
+    assert_eq!(sealed_bft, 6, "heights 107..=112 are sealed by the BFT engine");
+    assert!(rules.contains("Seal::WrongEngine"), "the fork's own rule was never reached");
+    assert!(rules.len() >= 20, "the BFT side of the sweep collapsed onto {rules:?}");
+}
+
+/// Which half of SPEC §3.2 rule 8 the "(PoW engine only)" annotation scopes.
+///
+/// `bits` is a hashed header field, so a compact target that is zero, does not
+/// expand, or is easier than `pow_limit` is malformed whoever sealed the block
+/// — that half is checked at every height. The *hash comparison* is proof of
+/// work's own business and is skipped under BFT, where the certificate is the
+/// proof and the nonce is required to be zero. A block that reaches only one
+/// of the two rules is the only way to tell the readings apart, so both are
+/// built here.
+#[test]
+fn rule_8_range_checks_bits_under_both_engines_but_weighs_work_only_under_pow() {
+    let mut chain = ChainBuilder::devnet_bft(0xbf75_0000_0000_0001, 4).unwrap();
+    chain.advance(6).unwrap();
+    let ctx = chain.next_ctx().unwrap();
+    assert_eq!(ctx.engine_id, BlockSeal::ENGINE_BFT);
+    let pre = chain.utxo().clone();
+
+    // A target of zero, at a BFT height: still rejected.
+    let block = chain
+        .build_block(&BlockPlan { bits: Some(CompactTarget(0)), ..BlockPlan::default() })
+        .unwrap();
+    let verdict = agree(&pre, &block, &ctx, "a zero target at a BFT height");
+    assert!(verdict.is_err(), "got {verdict:?}");
+    assert_eq!(rule_name(&verdict.unwrap_err()), "Header::ZeroTarget");
+
+    // Honest `bits`, and a nonce whose hash misses that target: accepted,
+    // because nothing at a BFT height weighs the header hash.
+    let mut weak = chain.build_block(&BlockPlan::default()).unwrap();
+    ferrum_sim::mutate::grind_until_invalid(&mut weak.header).unwrap();
+    let diff = agree(&pre, &weak, &ctx, "insufficient work at a BFT height")
+        .expect("the hash comparison is proof of work's own rule");
+    assert_eq!(diff.created.len(), 1, "the coinbase output");
+
+    // The same two blocks at a PoW height: both rejected, and for the two
+    // different halves of the rule.
+    let mut pow = ChainBuilder::devnet(0xbf75_0000_0000_0002).unwrap();
+    pow.advance(6).unwrap();
+    let pow_ctx = pow.next_ctx().unwrap();
+    assert_eq!(pow_ctx.engine_id, BlockSeal::ENGINE_POW);
+    let pow_pre = pow.utxo().clone();
+
+    let zero_bits = pow
+        .build_block(&BlockPlan {
+            bits: Some(CompactTarget(0)),
+            grind: false,
+            ..BlockPlan::default()
+        })
+        .unwrap();
+    let verdict = agree(&pow_pre, &zero_bits, &pow_ctx, "a zero target at a PoW height");
+    assert!(verdict.is_err(), "got {verdict:?}");
+    assert_eq!(rule_name(&verdict.unwrap_err()), "Header::ZeroTarget");
+
+    let mut no_work = pow.build_block(&BlockPlan { grind: false, ..BlockPlan::default() }).unwrap();
+    ferrum_sim::mutate::grind_until_invalid(&mut no_work.header).unwrap();
+    let verdict = agree(&pow_pre, &no_work, &pow_ctx, "insufficient work at a PoW height");
+    assert!(verdict.is_err(), "got {verdict:?}");
+    assert_eq!(rule_name(&verdict.unwrap_err()), "Header::InsufficientWork");
 }
 
 #[test]

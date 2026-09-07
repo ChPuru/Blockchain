@@ -19,6 +19,7 @@
 //! Static list only, with exponential reconnect backoff. No Kademlia, no
 //! discv5, no mDNS. See `docs/DECISIONS.md` D6.
 
+mod responder;
 mod worker;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -35,6 +36,8 @@ use tokio::task::JoinHandle;
 use crate::config::P2pConfig;
 use crate::error::P2pError;
 use crate::message::{GossipMessage, SyncRequest, SyncResponse};
+
+pub use crate::service::responder::SyncResponder;
 
 /// Name of the handle-to-service command queue, used in log lines and in
 /// [`P2pError::QueueFull`].
@@ -167,6 +170,10 @@ pub struct PeerInfo {
     pub last_rtt_ms: Option<u64>,
     /// Whether this peer is in the configured static peer list.
     pub is_static: bool,
+    /// How many connections this peer currently holds open, capped at
+    /// [`crate::limits::MAX_CONNECTIONS_PER_PEER`] for anything that is not a
+    /// configured static peer.
+    pub connections: u32,
 }
 
 /// Something the service wants the node to know about.
@@ -245,52 +252,6 @@ impl P2pEvent {
     }
 }
 
-/// The reply channel for one inbound sync request.
-///
-/// The response is capped again by the service before it goes on the wire, so
-/// a node bug cannot exceed the contract's 2000 headers or 64 blocks.
-#[derive(Debug)]
-pub struct SyncResponder {
-    id: RequestId,
-    peer: PeerId,
-    commands: mpsc::Sender<P2pCommand>,
-    counters: Arc<ShedCounters>,
-    answered: bool,
-}
-
-impl SyncResponder {
-    /// The libp2p id of the request being answered.
-    pub fn request_id(&self) -> RequestId {
-        self.id
-    }
-
-    /// The peer waiting for the answer.
-    pub fn peer(&self) -> PeerId {
-        self.peer
-    }
-
-    /// Send the answer.
-    ///
-    /// Consumes the responder: a request is answered exactly once.
-    pub fn respond(mut self, response: SyncResponse) -> Result<(), P2pError> {
-        self.answered = true;
-        send_command(
-            &self.commands,
-            &self.counters,
-            P2pCommand::Respond { id: self.id, response: Box::new(response) },
-        )
-    }
-}
-
-impl Drop for SyncResponder {
-    fn drop(&mut self) {
-        if !self.answered {
-            // Free the parked response channel; libp2p will report a
-            // ResponseOmission to the peer rather than leaving it hanging.
-            let _ = self.commands.try_send(P2pCommand::CancelResponse { id: self.id });
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Commands
@@ -350,7 +311,7 @@ impl P2pCommand {
 
 /// Try to enqueue a command, shedding with a warning and a counter when the
 /// bounded queue is full.
-fn send_command(
+pub(crate) fn send_command(
     tx: &mpsc::Sender<P2pCommand>,
     counters: &ShedCounters,
     cmd: P2pCommand,
@@ -676,46 +637,6 @@ mod tests {
         let err = send_command(&tx, &ShedCounters::default(), P2pCommand::Shutdown)
             .expect_err("a closed queue must report the service as stopped");
         assert!(matches!(err, P2pError::ServiceStopped));
-    }
-
-    #[tokio::test]
-    async fn an_unanswered_responder_cancels_its_request_on_drop() {
-        let (tx, mut rx) = mpsc::channel::<P2pCommand>(4);
-        let responder = SyncResponder {
-            id: RequestId::new(7),
-            peer: PeerId::random(),
-            commands: tx,
-            counters: Arc::new(ShedCounters::default()),
-            answered: false,
-        };
-        let id = responder.request_id();
-        drop(responder);
-
-        match rx.try_recv().expect("a cancel must be queued") {
-            P2pCommand::CancelResponse { id: got } => assert_eq!(got, id),
-            other => panic!("wrong command: {}", other.kind()),
-        }
-    }
-
-    #[tokio::test]
-    async fn answering_a_responder_sends_the_response_and_no_cancel() {
-        let (tx, mut rx) = mpsc::channel::<P2pCommand>(4);
-        let responder = SyncResponder {
-            id: RequestId::new(7),
-            peer: PeerId::random(),
-            commands: tx,
-            counters: Arc::new(ShedCounters::default()),
-            answered: false,
-        };
-        responder.respond(SyncResponse::NotFound).expect("respond");
-
-        match rx.try_recv().expect("a response must be queued") {
-            P2pCommand::Respond { response, .. } => {
-                assert_eq!(*response, SyncResponse::NotFound);
-            }
-            other => panic!("wrong command: {}", other.kind()),
-        }
-        assert!(rx.try_recv().is_err(), "no cancel may follow a response");
     }
 
     #[test]

@@ -283,9 +283,9 @@ node is on the network you think it is on:
 
 | Network | Genesis block hash |
 |---|---|
-| **mainnet** | `6bfa4fee9e522a6071b5d7d04fc400144d9f519ba95b78d37346f7c597c4436c` |
-| **testnet** | `9edeafc16709d76a957c0b11587881cb0161dd19069fc25025fbdc4b4ff6e516` |
-| **devnet**  | `9167643790fc744081aa3656d33a4e02fc122b729198716563b2ee60db428444` |
+| **mainnet** | `8bfd7dc0fc73ed481b3891f433aee3f50f14a847a6de66ccbf2af3f4942ce229` |
+| **testnet** | `0271729260045601a991075df86e689acf74eec3aaa930b64513ada36ef18440` |
+| **devnet**  | `7747ccde4c1bae8d7f91913e9bcf2f5288c19a54ba0444ed7d21c49f9715008f` |
 
 The fields behind them, shared by all three except where the table says otherwise:
 
@@ -299,9 +299,9 @@ The fields behind them, shared by all three except where the table says otherwis
 | coinbase input | `OutPoint::NULL` — 32 zero bytes and `vout = 0xffffffff` — with `sequence = 0xffffffff` |
 | coinbase `script_sig` | `0x00` (`OP_0`, the minimal push of height 0, BIP-34) then a push of the ASCII `Ferrum v1 genesis <network>`; 26 bytes on devnet, inside the 2..=100 window rule 14 requires |
 | coinbase output | the 50 FRM subsidy, locked to `OP_RETURN <32-byte genesis_commitment>` — provably unspendable, so the subsidy is burned |
-| `merkle_root` | mainnet `9967df4f7957e4bb8b629dc5cbe60411c3ec4058f88a3136e832805ddd409405` |
-| | testnet `c63d0a3f08a4dd8d451c70ab01ab5f9fccb8e9b44fdb538a6a1cf56e1f6e8650` |
-| | devnet `8fedad9c3ec385af18086c5cb8596f6aa7c017886c40289688a311eacd40030a` |
+| `merkle_root` | mainnet `42dc1be3c6357b0ca832e5b5865ce1d4005ef6f8316cd8246884b9278d2d42c4` |
+| | testnet `a689d3978bcd0c2c0fa4d4d2b1cedb22efdbde5eda1d935b2f2d8eea987c2ff5` |
+| | devnet `db335655845805ab6351958c5dedfe3e0ec8f3e94745b1716fc42e425a135654` |
 | serialized block | 230 bytes on mainnet and testnet, 229 on devnet (`borsh(Block)`) |
 
 Devnet's hash is not merely a different `chain_id`: `genesis_commitment` covers `target_spacing_ms`,
@@ -315,6 +315,14 @@ address prefix, so without something network-specific *inside* the block they wo
 genesis hash and a testnet node could complete a header handshake with a mainnet peer. The
 `OP_RETURN` payload is `genesis_commitment(params)`, a `TAG_GENESIS` hash over the consensus-critical
 parameters, which is why the three hashes above differ at all.
+
+**The fork schedule is inside the commitment.** `bft_activation_height` and the *ordered*
+`bft_validators` list are hashed in alongside the monetary and difficulty parameters, so a node whose
+`--consensus-config` disagrees with yours — a missed rollout, a validator list in a different order —
+fails at startup with a genesis mismatch instead of at the activation height with a permanent fork.
+The three hashes above were republished when that changed; a node built before it computes the older
+values and will not peer with this tree, which is the check doing its job. See
+[`docs/DECISIONS.md`](DECISIONS.md) D11.
 
 ### Verifying a hash yourself
 

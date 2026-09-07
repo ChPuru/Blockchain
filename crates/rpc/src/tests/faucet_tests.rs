@@ -118,6 +118,28 @@ async fn the_faucet_pays_and_returns_a_txid() {
 }
 
 #[tokio::test]
+async fn a_payment_the_mempool_refuses_leaves_the_quota_unspent() {
+    let f = Fixture::build(1, false);
+    let a = faucet_app(&f, Arc::new(AlwaysPays));
+    let body = format!(r#"{{"address":"{}"}}"#, f.recipient.encode());
+
+    // The pool refuses the first payment — a conflicting spend, in practice.
+    f.mempool.reject_with("conflicting transaction");
+    let (status, json) = post_json(&a, "/api/faucet", &body).await;
+    assert!(status.is_client_error() || status.is_server_error(), "{json}");
+    assert_eq!(f.mempool.len(), 0, "nothing was accepted");
+
+    // The quota must still be there: the payment was never made.
+    let (retry_status, retry) = post_json(&a, "/api/faucet", &body).await;
+    assert_ne!(
+        retry["code"],
+        Value::from(RpcErrorCode::FaucetRateLimited.code()),
+        "a refused payment spent the address's 24-hour window: {retry}"
+    );
+    assert_ne!(retry_status, StatusCode::TOO_MANY_REQUESTS, "{retry}");
+}
+
+#[tokio::test]
 async fn stats_advertises_the_faucet_only_when_one_is_configured() {
     let f = Fixture::build(1, false);
     let (_, without) = get(&app(f.context()), "/api/stats").await;
@@ -326,7 +348,7 @@ fn a_faucet_over_a_real_wallet_still_rate_limits() {
         1_000,
     ));
     let faucet = Faucet::with_clock(FaucetConfig::default(), source, Arc::new(FrozenClock));
-    assert!(faucet.dispense(&f.recipient, "10.0.0.1").is_ok());
-    let err = faucet.dispense(&f.recipient, "10.0.0.1").unwrap_err();
+    assert!(faucet.dispense(&f.recipient, "10.0.0.1", |_| Ok(())).is_ok());
+    let err = faucet.dispense(&f.recipient, "10.0.0.1", |_| Ok(())).unwrap_err();
     assert_eq!(err.code(), RpcErrorCode::FaucetRateLimited);
 }

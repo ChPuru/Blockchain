@@ -31,12 +31,28 @@ use ferrum_types::{Amount, BlockHash, Hash32, OutPoint, Txid};
 #[non_exhaustive]
 pub enum ValidationError {
     // ---------------------------------------------- SPEC §3.1 context-free
-    /// Rule 1: the block is larger than `params.max_block_size`.
+    /// Rule 1a: the block — header, count and transactions, without the seal —
+    /// is larger than `params.max_block_size`.
     #[error("block is {size} bytes, limit is {max}")]
     BlockTooLarge {
-        /// The block's serialized size.
+        /// The block's size excluding the seal, `Block::consensus_size()`.
         size: usize,
         /// `params.max_block_size`.
+        max: usize,
+    },
+
+    /// Rule 1b: the engine seal is longer than the largest certificate this
+    /// validator set can produce.
+    ///
+    /// The seal is bounded separately from the transactions because it is not
+    /// committed to by the block hash and may legally vary between `quorum` and
+    /// `n` signatures (DECISIONS D2, D12). Letting it into rule 1 would make one
+    /// block hash have several sizes, only some of which fit.
+    #[error("block seal is {size} bytes, limit is {max}")]
+    SealTooLarge {
+        /// The seal payload's length.
+        size: usize,
+        /// `BlockSeal::max_data_len(params.bft_validators.len())`.
         max: usize,
     },
 
@@ -207,6 +223,71 @@ pub enum ValidationError {
         tx_index: usize,
         /// Its `lock_time` field.
         lock_time: u32,
+    },
+
+    /// SPEC §4.4 — an input's BIP-68 relative locktime is not satisfied by the
+    /// age of the coin it spends.
+    ///
+    /// `OP_CHECKSEQUENCEVERIFY` only compares the script's operand against the
+    /// input's own `sequence`, a field the spender writes freely. It becomes a
+    /// timelock only because this rule separately requires the coin to be old
+    /// enough for that `sequence` to be legal.
+    #[error(
+        "transaction {tx_index} input {input_index} needs {required} more blocks: sequence \
+         0x{sequence:08x} against a coin from height {coin_height} spent at height {spend_height}"
+    )]
+    UnsatisfiedRelativeLock {
+        /// Which transaction in the block.
+        tx_index: usize,
+        /// Which input of that transaction.
+        input_index: usize,
+        /// The input's `sequence` field.
+        sequence: u32,
+        /// The relative lock the low 16 bits ask for, in blocks.
+        required: u32,
+        /// The height the spent coin was created at.
+        coin_height: u64,
+        /// The height this block occupies.
+        spend_height: u64,
+    },
+
+    /// SPEC §4.4 — an input asks for the 512-second flavour of a relative
+    /// locktime, which the determinism seam cannot evaluate.
+    ///
+    /// BIP-68's time flavour compares the median time past of the block that
+    /// *created* the coin against this block's. [`crate::BlockCtx`] carries
+    /// only the parent's median, and [`ferrum_types::Coin`] carries only a
+    /// height, so the age in seconds is not computable here. An unenforceable
+    /// timelock must fail closed: accepting the input would mean the lock is
+    /// silently not a lock at all.
+    #[error(
+        "transaction {tx_index} input {input_index} asks for a 512-second relative locktime \
+         (sequence 0x{sequence:08x}), which this validator cannot evaluate"
+    )]
+    UnsupportedRelativeTimeLock {
+        /// Which transaction in the block.
+        tx_index: usize,
+        /// Which input of that transaction.
+        input_index: usize,
+        /// The input's `sequence` field.
+        sequence: u32,
+    },
+
+    /// The block demands more signature verifications than its budget allows.
+    ///
+    /// `MAX_OPS` is a *per-input* limit and `OP_CHECKMULTISIG` charges `1 + n`
+    /// operations for up to `n` verifications, so one input can demand around
+    /// 190 of them — and the expensive script lives in the `script_pubkey`,
+    /// which is already in the UTXO set, so the spending input costs an
+    /// attacker as little as 44 bytes. Without a block-wide budget there is no
+    /// proportionality at all between the bytes bought and the work every node
+    /// must do. Bitcoin closes the same gap with `MAX_BLOCK_SIGOPS`.
+    #[error("block demands {used} signature checks, budget is {budget}")]
+    SigCheckBudgetExceeded {
+        /// How many checks the block had reached when the budget was passed.
+        used: u64,
+        /// `max_block_sig_checks(params)`.
+        budget: u64,
     },
 
     /// `script::verify` rejected an input.

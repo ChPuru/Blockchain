@@ -290,6 +290,50 @@ pub enum ScriptError {
         sequence: u32,
     },
 
+    /// BIP-68: the coin being spent has not aged the number of **blocks** the
+    /// input's `sequence` demands. Without this the script half of BIP-112 is
+    /// only a comparison of two numbers the spender wrote, and the relative
+    /// timelock never happens.
+    #[error(
+        "relative locktime not matured: {required} blocks required, coin created at height \
+         {coin_height} and spent at {block_height}"
+    )]
+    ImmatureRelativeHeight {
+        /// Blocks the input's `sequence` demands (`sequence & 0xffff`).
+        required: u32,
+        /// Height of the block that created the coin being spent.
+        coin_height: u64,
+        /// Height of the block that spends it.
+        block_height: u64,
+    },
+
+    /// BIP-68: the coin being spent has not aged the number of **seconds** the
+    /// input's `sequence` demands, measured in 512-second units against median
+    /// time past.
+    #[error(
+        "relative locktime not matured: {required_s}s required, coin median time past \
+         {coin_mtp_s} and spending median time past {block_mtp_s}"
+    )]
+    ImmatureRelativeTime {
+        /// Seconds the input's `sequence` demands (`(sequence & 0xffff) << 9`).
+        required_s: u64,
+        /// Median time past of the block that created the coin being spent.
+        coin_mtp_s: u64,
+        /// Median time past of the block that spends it.
+        block_mtp_s: u64,
+    },
+
+    /// `OP_CHECKSEQUENCEVERIFY` needed the spent coin's height and
+    /// [`crate::ExecCtx::input_height`] was `None`. A relative locktime that
+    /// cannot be checked fails, rather than passing unchecked.
+    #[error("OP_CHECKSEQUENCEVERIFY: the context did not supply the spent coin's height")]
+    UnknownCoinHeight,
+
+    /// `OP_CHECKSEQUENCEVERIFY` needed the spent coin's median time past and
+    /// [`crate::ExecCtx::input_mtp_s`] was `None`.
+    #[error("OP_CHECKSEQUENCEVERIFY: the context did not supply the spent coin's median time")]
+    UnknownCoinTime,
+
     // ---- template construction ----
     /// `templates::multisig` was given zero keys, or more than
     /// [`crate::limits::MAX_PUBKEYS_PER_MULTISIG`].

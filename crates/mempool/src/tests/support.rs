@@ -333,3 +333,72 @@ pub fn block_of(
     });
     Block::new(header, txs, BlockSeal::POW)
 }
+
+// ------------------------------------------------------------ counting view
+
+/// A [`StateView`] that counts every read reaching the backing store.
+///
+/// Selection is supposed to touch the underlying UTXO set a bounded number of
+/// times per candidate. That is a cost property, not a value property, so the
+/// only way to assert it is to count the reads.
+#[derive(Debug)]
+pub struct CountingView {
+    inner: MapView,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingView {
+    /// Wrap a map view.
+    #[must_use]
+    pub fn new(inner: MapView) -> Self {
+        CountingView { inner, reads: std::sync::atomic::AtomicUsize::new(0) }
+    }
+
+    /// How many reads have reached the backing map.
+    #[must_use]
+    pub fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Forget the count so far.
+    pub fn reset(&self) {
+        self.reads.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn tick(&self) {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl StateView for CountingView {
+    fn get_coin(&self, op: &OutPoint) -> Result<Option<Coin>, ferrum_storage::StorageError> {
+        self.tick();
+        self.inner.get_coin(op)
+    }
+
+    fn has_coin(&self, op: &OutPoint) -> Result<bool, ferrum_storage::StorageError> {
+        self.tick();
+        self.inner.has_coin(op)
+    }
+}
+
+/// A chain of `depth` transactions, each spending its parent's only output and
+/// each paying a strictly **higher** fee rate than its parent.
+///
+/// That ordering is the adversarial one: the fee index hands the selector the
+/// deepest descendant first, so a selector that re-scans the whole pending
+/// list on every pass makes exactly one transaction of progress per pass.
+#[must_use]
+pub fn ascending_fee_chain(root: OutPoint, value: u64, depth: usize) -> Vec<Transaction> {
+    let mut chain = Vec::with_capacity(depth);
+    let mut prev = root;
+    let mut left = value;
+    for k in 0..depth {
+        let fee = 100u64 * (u64::try_from(k).expect("depth fits") + 1);
+        left -= fee;
+        let t = tx(&[prev], &[left]);
+        prev = out(&t, 0);
+        chain.push(t);
+    }
+    chain
+}

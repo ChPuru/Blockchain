@@ -7,6 +7,7 @@
 //! tallies are consensus state, so iteration order must be identical on every
 //! node (CONTRACT 0.2).
 
+use core::ops::Bound;
 use core::time::Duration;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -344,19 +345,39 @@ impl VoteTally {
     /// stops a slow node from stalling a height it has already been overtaken
     /// in.
     pub fn skip_round(&self, current: u32, threshold: usize) -> Option<u32> {
-        let mut rounds: BTreeSet<u32> = BTreeSet::new();
-        rounds.extend(self.prevotes.keys().copied().filter(|r| *r > current));
-        rounds.extend(self.precommits.keys().copied().filter(|r| *r > current));
-        rounds.into_iter().find(|round| {
+        // Merge-walk the two maps in ascending round order and stop at the
+        // first qualifying round. The obvious spelling — collect every round
+        // above `current` into a set, then scan it — allocates a fresh set
+        // proportional to the whole round space on *every* call, and this is
+        // called on every pass of every event.
+        let window = (Bound::Excluded(current), Bound::Unbounded);
+        let mut prevotes = self.prevotes.range(window);
+        let mut precommits = self.precommits.range(window);
+        let mut next_prevote = prevotes.next();
+        let mut next_precommit = precommits.next();
+        loop {
+            let round = match (next_prevote, next_precommit) {
+                (None, None) => return None,
+                (Some((round, _)), None) | (None, Some((round, _))) => *round,
+                (Some((a, _)), Some((b, _))) => *a.min(b),
+            };
             let mut seen: BTreeSet<u16> = BTreeSet::new();
-            if let Some(votes) = self.prevotes.get(round) {
+            if let Some((r, votes)) = next_prevote
+                && *r == round
+            {
                 seen.extend(votes.voters());
+                next_prevote = prevotes.next();
             }
-            if let Some(votes) = self.precommits.get(round) {
+            if let Some((r, votes)) = next_precommit
+                && *r == round
+            {
                 seen.extend(votes.voters());
+                next_precommit = precommits.next();
             }
-            seen.len() >= threshold
-        })
+            if seen.len() >= threshold {
+                return Some(round);
+            }
+        }
     }
 
     /// Every validator caught equivocating at this height, in any round or

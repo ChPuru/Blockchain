@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use ferrum_consensus::{ConsensusError, EngineRouter};
-use ferrum_storage::{BlockStatus, Store, StoreConfig, header_hash};
+use ferrum_storage::{BlockIndexEntry, BlockStatus, Store, StoreConfig, header_hash};
 use ferrum_types::{Amount, BlockHash, ChainParams, CompactTarget, Hash32};
 
 use crate::error::{ChainError, ValidationError};
@@ -420,4 +420,91 @@ fn the_manager_exposes_what_it_was_built_with() {
     assert_eq!(t.chain.params().network, t.params.network);
     assert_eq!(t.chain.store().utxo_count().unwrap(), 1);
     assert_eq!(t.chain.engines().params().network, t.params.network);
+}
+
+#[test]
+fn a_storage_failure_does_not_condemn_the_block_or_leave_a_stale_tip() {
+    // `BlockStatus::Invalid` is permanent, inherited by every descendant, and
+    // bans the peers that serve them. Only a rule the block broke may write it.
+    // Here the block is perfectly valid and the *store* is the problem: the tip
+    // moved underneath the cache, which is exactly the state a reorg that failed
+    // part-way leaves behind.
+    let t = TestChain::new();
+    let main = t.extend(3);
+
+    t.store.disconnect_tip().unwrap();
+    assert_eq!(t.tip().1, 3, "the cache still names the old tip");
+    assert_eq!(t.store.tip().unwrap().unwrap().1, 2, "the store does not");
+
+    let stamp = t.header(&main[2]).timestamp_ms + t.params.target_spacing_ms;
+    let next = t.mine_on(&main[2], Vec::new(), stamp, 9);
+    let hash = header_hash(&next.header);
+
+    match t.accept(next) {
+        Err(ChainError::Storage(_)) => {}
+        other => panic!("expected the connect to fail on the tip mismatch, got {other:?}"),
+    }
+
+    assert_ne!(
+        t.store.get_header(&hash).unwrap().unwrap().status,
+        BlockStatus::Invalid,
+        "the store failed, the block did not"
+    );
+    assert_eq!(
+        t.tip(),
+        (main[1], 2),
+        "the cache must not go on claiming a tip the store does not have"
+    );
+
+    // Because nothing was condemned, the node recovers on its own.
+    let stamp = t.header(&main[1]).timestamp_ms + t.params.target_spacing_ms;
+    let again = t.mine_on(&main[1], Vec::new(), stamp, 10);
+    let again_hash = header_hash(&again.header);
+    assert_eq!(t.accept(again).unwrap(), AcceptOutcome::Extended(again_hash));
+}
+
+#[test]
+fn a_status_claiming_a_body_the_store_lacks_is_repaired_not_ignored() {
+    // The state a crash between the two writes leaves if the header is written
+    // first: the index says `HaveData`, the `blocks` table has nothing. Sync
+    // computes "do I still need this body?" from that byte, so it never asks
+    // again, and gossip is answered with `Duplicate` — the node can never
+    // connect the block. Re-offering it has to repair the store.
+    let t = TestChain::new();
+    let block = t.mine(Vec::new());
+    let hash = header_hash(&block.header);
+
+    t.chain.accept_header(block.header).unwrap();
+    let stored = t.store.get_header(&hash).unwrap().unwrap();
+    t.store
+        .store_header(&BlockIndexEntry { status: BlockStatus::HaveData, ..stored })
+        .unwrap();
+    assert!(t.store.get_block(&hash).unwrap().is_none(), "no body, by construction");
+
+    assert_eq!(t.accept(block).unwrap(), AcceptOutcome::Extended(hash));
+    assert!(t.store.get_block(&hash).unwrap().is_some(), "the body was written after all");
+    assert_eq!(t.tip(), (hash, 1));
+    let repaired = t.store.get_header(&hash).unwrap().unwrap();
+    assert_eq!(repaired.tx_count, 1, "and the index entry describes the body it now has");
+    assert!(repaired.size > 0);
+}
+
+#[test]
+fn a_stored_block_that_does_not_win_is_still_reported_as_a_duplicate() {
+    // Re-running fork choice for a stored block must not change what a caller
+    // is told about one that loses: the node's gossip verdict maps `Duplicate`
+    // to "ignore, do not forward", and a losing side-chain block re-offered by
+    // three peers is not three new blocks.
+    let t = TestChain::new();
+    let main = t.extend(2);
+    let genesis = t.store.hash_at_height(0).unwrap().unwrap();
+    let base_ms = t.header(&genesis).timestamp_ms;
+
+    // A branch off genesis: one block against the chain's two, so it loses on
+    // cumulative work outright rather than on the hash tiebreak.
+    let side = t.mine_on(&genesis, Vec::new(), base_ms + t.params.target_spacing_ms, 402);
+    let side_hash = header_hash(&side.header);
+    assert_eq!(t.accept(side.clone()).unwrap(), AcceptOutcome::SideChain(side_hash));
+    assert_eq!(t.accept(side).unwrap(), AcceptOutcome::Duplicate, "offered twice, still a duplicate");
+    assert_eq!(t.tip().0, main[1], "and the tip did not move");
 }

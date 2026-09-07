@@ -23,7 +23,10 @@ use ferrum_types::{Hash32, Script};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ScriptError;
-use crate::limits::{MAX_OP_RETURN_PAYLOAD, MAX_PUBKEYS_PER_MULTISIG, PUBKEY_HASH_SIZE};
+use crate::limits::{
+    MAX_LOCKTIME_NUM_SIZE, MAX_NUM_SIZE, MAX_OP_RETURN_PAYLOAD, MAX_PUBKEYS_PER_MULTISIG,
+    PUBKEY_HASH_SIZE,
+};
 use crate::num::ScriptNum;
 use crate::opcode::{Instruction, Opcode};
 use crate::parse::parse;
@@ -224,10 +227,26 @@ fn push_of_len(i: Option<&Instruction>, len: usize) -> Option<&[u8]> {
     i.and_then(Instruction::push_data).filter(|d| d.len() == len)
 }
 
-/// The number a push encodes, when it is a minimal `ScriptNum`.
+/// The number a push encodes, when it is a minimal arithmetic `ScriptNum`.
+///
+/// Four bytes, the arithmetic ceiling — right for the `k` and `n` of a
+/// multisig, wrong for a locktime.
 fn push_as_num(i: Option<&Instruction>) -> Option<i64> {
     let data = i.and_then(Instruction::push_data)?;
-    ScriptNum::from_slice(data, 4, true).ok().map(ScriptNum::value)
+    ScriptNum::from_slice(data, MAX_NUM_SIZE, true).ok().map(ScriptNum::value)
+}
+
+/// The number a push encodes when it is a **locktime** operand.
+///
+/// Five bytes, not [`MAX_NUM_SIZE`]: a `lock_time` is a `u32`, and any value at
+/// or above `0x8000_0000` needs the extra sign byte. `check_lock_time` reads
+/// the operand at exactly this width, so the classifier must accept exactly
+/// these widths too — otherwise a script the VM executes happily is labelled
+/// [`ScriptType::NonStandard`] and the mempool refuses to relay an output this
+/// module itself builds.
+fn push_as_locktime_num(i: Option<&Instruction>) -> Option<i64> {
+    let data = i.and_then(Instruction::push_data)?;
+    ScriptNum::from_slice(data, MAX_LOCKTIME_NUM_SIZE, true).ok().map(ScriptNum::value)
 }
 
 /// True when `window` is `OP_DUP OP_HASH160 <20B> OP_EQUALVERIFY OP_CHECKSIG`.
@@ -287,7 +306,7 @@ pub fn classify(s: &Script) -> ScriptType {
 
     // CLTV: <locktime> OP_CLTV OP_DROP <P2PKH tail>
     if i.len() == 8
-        && push_as_num(i.first()).is_some_and(|v| v >= 0)
+        && push_as_locktime_num(i.first()).is_some_and(|v| v >= 0)
         && is_op(i.get(1), Opcode::CheckLockTimeVerify)
         && is_op(i.get(2), Opcode::Drop)
         && i.get(3..8).is_some_and(is_p2pkh_tail)
@@ -315,7 +334,7 @@ fn is_htlc(i: &[Instruction]) -> bool {
         && is_op(i.get(3), Opcode::EqualVerify)
         && i.get(4..9).is_some_and(is_p2pkh_tail)
         && is_op(i.get(9), Opcode::Else)
-        && push_as_num(i.get(10)).is_some_and(|v| v >= 0)
+        && push_as_locktime_num(i.get(10)).is_some_and(|v| v >= 0)
         && is_op(i.get(11), Opcode::CheckLockTimeVerify)
         && is_op(i.get(12), Opcode::Drop)
         && i.get(13..18).is_some_and(is_p2pkh_tail)
@@ -441,6 +460,47 @@ mod tests {
         assert_eq!(s.as_bytes().first(), Some(&0x03));
         assert_eq!(s.as_bytes().get(4), Some(&0xb1));
         assert_eq!(s.as_bytes().get(5), Some(&0x75));
+    }
+
+    #[test]
+    fn cltv_is_classified_across_the_five_byte_locktime_boundary() {
+        // A locktime at or above 0x8000_0000 needs five bytes in sign-magnitude
+        // form — which is why the interpreter reads the operand at
+        // MAX_LOCKTIME_NUM_SIZE. The classifier has to accept exactly the same
+        // widths, or the mempool calls a script the VM executes NonStandard and
+        // refuses to relay an output this very module builds. Unix timestamps
+        // cross 0x8000_0000 in January 2038.
+        for locktime in [0u32, 1, 500_000, 0x7fff_ffff, 0x8000_0000, 0x8000_0001, 0xffff_ffff] {
+            let s = cltv_p2pkh(locktime, &[1u8; 20]);
+            assert_eq!(classify(&s), ScriptType::Cltv, "locktime {locktime}");
+            assert!(parse(&s).is_ok(), "locktime {locktime}");
+        }
+        // The five-byte encoding really is five bytes: <05> <ll ll ll ll 00>.
+        assert_eq!(cltv_p2pkh(0x8000_0000, &[1u8; 20]).as_bytes().first(), Some(&0x05));
+    }
+
+    #[test]
+    fn htlc_is_classified_across_the_five_byte_timeout_boundary() {
+        for timeout in [0u32, 600_000, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff] {
+            let s = htlc(&[1u8; 20], &[2u8; 20], timeout, &[3u8; 20]);
+            assert_eq!(classify(&s), ScriptType::Htlc, "timeout {timeout}");
+        }
+    }
+
+    #[test]
+    fn a_six_byte_operand_is_still_not_a_cltv() {
+        // The widening stops at five bytes: the operand limit the interpreter
+        // enforces. A wider push is NonStandard, as it is unexecutable.
+        // 2^40 needs six bytes; 2^32 would still fit in five and is therefore
+        // a legal, if unsatisfiable, operand.
+        let operand = ScriptNum::new(0x100_0000_0000).to_vec();
+        assert_eq!(operand.len(), 6);
+        let mut bytes = Vec::new();
+        push_data(&mut bytes, &operand);
+        bytes.push(Opcode::CheckLockTimeVerify.to_byte());
+        bytes.push(Opcode::Drop.to_byte());
+        push_p2pkh_tail(&mut bytes, &[1u8; 20]);
+        assert_eq!(classify(&Script::new(bytes)), ScriptType::NonStandard);
     }
 
     #[test]

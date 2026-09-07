@@ -5,7 +5,7 @@ use ferrum_types::{Amount, BlockHash, ChainParams, Hash32};
 
 use crate::error::{ChainError, ValidationError};
 use crate::manager::AcceptOutcome;
-use crate::reorg::{connect_tip_block, plan_reorg};
+use crate::reorg::{ReorgPlan, connect_tip_block, execute_reorg, plan_reorg};
 use crate::tests::support::{
     TestChain, any_spend_script, coinbase, devnet_with, out_point, reseal, spend,
 };
@@ -276,4 +276,101 @@ fn connect_tip_block_refuses_a_block_it_has_no_body_for() {
         connect_tip_block(&t.store, &t.params, &t.engines, &hash),
         Err(ChainError::MissingBlockBody(h)) if h == hash
     ));
+}
+
+#[test]
+fn a_reorg_onto_a_branch_whose_bodies_are_missing_is_deferred_not_condemned() {
+    // Headers-first sync stores headers long before the bodies behind them, so
+    // a heavier branch is routinely known as headers with only some bodies in
+    // hand. Gossip can then deliver the *tip's* body first. Treating the
+    // resulting `MissingBlockBody` as a verdict about the branch marks the whole
+    // honest chain `Invalid` — permanently, inherited by every later block, and
+    // every peer serving it gets banned.
+    let t = TestChain::with_params(fast_difficulty());
+    let main = t.extend(2);
+    let base_ms = t.header(&main[0]).timestamp_ms;
+
+    let b2 = t.mine_on(&main[0], Vec::new(), base_ms + 1_000, 301);
+    let b2_hash = header_hash(&b2.header);
+    t.chain.accept_header(b2.header).unwrap();
+
+    let b3 = t.mine_on(&b2_hash, Vec::new(), base_ms + 2_000, 302);
+    let b3_hash = header_hash(&b3.header);
+
+    let before_tip = t.tip();
+    let before_root = t.state_root();
+    match t.accept(b3.clone()) {
+        Err(ChainError::MissingBlockBody(h)) if h == b2_hash => {}
+        other => panic!("expected the reorg to defer on the missing body, got {other:?}"),
+    }
+
+    for (name, hash) in [("the missing block", b2_hash), ("the branch tip", b3_hash)] {
+        assert_ne!(
+            t.store.get_header(&hash).unwrap().unwrap().status,
+            BlockStatus::Invalid,
+            "{name} is not invalid; its body simply has not arrived"
+        );
+    }
+    assert_eq!(t.tip(), before_tip, "nothing was disconnected");
+    assert_eq!(t.state_root(), before_root);
+
+    // And the retry works: once the gap is filled, re-offering the branch tip
+    // adopts it. A stored-but-unconnected block that wins fork choice must be
+    // reconsidered rather than dismissed as a duplicate, or the node sits one
+    // block below the network until someone happens to gossip it again.
+    t.accept(b2).unwrap();
+    match t.accept(b3).unwrap() {
+        AcceptOutcome::Extended(h) if h == b3_hash => {}
+        AcceptOutcome::Reorged { to, .. } if to == b3_hash => {}
+        other => panic!("the stored branch tip must be reconsidered, got {other:?}"),
+    }
+    assert_eq!(t.tip(), (b3_hash, 3), "the heavier branch wins once its bodies are all present");
+}
+
+#[test]
+fn a_disconnect_that_fails_part_way_puts_the_blocks_back() {
+    // Every `disconnect_tip` is its own committed transaction, so a failure on
+    // the Nth leaves N-1 blocks off the active chain. The store is then at a
+    // state no chain ever had, and the next honest block is rejected with
+    // `NonContiguousConnect` — which used to be recorded as *the block's* fault.
+    let t = TestChain::new();
+    let main = t.extend(3);
+    let before_tip = t.store.tip().unwrap().unwrap();
+    let before_root = t.state_root();
+    let before_utxos = t.utxo_snapshot();
+
+    // A plan that walks one block past genesis. Genesis cannot be disconnected,
+    // so the fourth call fails after three have already been committed.
+    let genesis = t.store.hash_at_height(0).unwrap().unwrap();
+    let plan = ReorgPlan {
+        fork_hash: genesis,
+        fork_height: 0,
+        disconnect: vec![main[2], main[1], main[0], genesis],
+        connect: Vec::new(),
+    };
+
+    match execute_reorg(&t.store, &t.params, &t.engines, &plan) {
+        Err(ChainError::Storage(_)) => {}
+        other => panic!("expected the disconnect to fail, got {other:?}"),
+    }
+
+    assert_eq!(t.store.tip().unwrap(), Some(before_tip), "the chain is back where it started");
+    assert_eq!(t.state_root(), before_root, "and so is the UTXO set");
+    assert_eq!(t.utxo_snapshot(), before_utxos);
+}
+
+#[test]
+fn a_reorg_that_cannot_connect_for_a_storage_reason_leaves_the_branch_alone() {
+    // The verdict recorded on a failed connect must depend on *why* it failed.
+    // `is_consensus_verdict` draws that line, and only a rule the block itself
+    // broke may write the permanent, inherited `Invalid`.
+    use ferrum_storage::StorageError;
+
+    use crate::error::ValidationError;
+    use crate::reorg::is_consensus_verdict;
+
+    assert!(is_consensus_verdict(&ChainError::Validation(ValidationError::EmptyBlock)));
+    assert!(!is_consensus_verdict(&ChainError::Storage(StorageError::NoTip)));
+    assert!(!is_consensus_verdict(&ChainError::MissingBlockBody(BlockHash::ZERO)));
+    assert!(!is_consensus_verdict(&ChainError::Arithmetic("cumulative work")));
 }

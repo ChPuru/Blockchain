@@ -254,6 +254,28 @@ impl BlockSeal {
     pub(crate) fn borsh_size(&self) -> usize {
         5usize.saturating_add(self.data.len())
     }
+
+    /// Fixed part of a `borsh(BftCommit)`: `height` (8) + `round` (4) +
+    /// `block_hash` (32) + the `u32` length of the signature vector.
+    pub const BFT_COMMIT_FIXED: usize = 48;
+
+    /// One `(u16 index, 64-byte Signature)` entry of a commit certificate.
+    pub const BFT_COMMIT_PER_SIGNATURE: usize = 66;
+
+    /// The largest `data` a legal commit certificate for `validators`
+    /// validators can encode to.
+    ///
+    /// `verify_commit` accepts anywhere from `quorum` to `n` signatures — the
+    /// indices only have to be strictly ascending and known — so the bound is
+    /// `n`, not the quorum. It is what the block-size rule uses to bound the
+    /// seal *separately* from the transactions: the seal is outside everything
+    /// the block hash commits to (DECISIONS D2), so it must not be able to
+    /// change whether the block fits (DECISIONS D12).
+    #[must_use]
+    pub const fn max_data_len(validators: usize) -> usize {
+        Self::BFT_COMMIT_FIXED
+            .saturating_add(Self::BFT_COMMIT_PER_SIGNATURE.saturating_mul(validators))
+    }
 }
 
 /// A block: header, transactions, and the engine seal.
@@ -302,6 +324,24 @@ impl Block {
     pub fn serialized_size(&self) -> usize {
         // header || u32 tx count || txs || seal
         let mut n = HEADER_SIZE.saturating_add(4).saturating_add(self.seal.borsh_size());
+        for tx in &self.txs {
+            n = n.saturating_add(tx.borsh_size());
+        }
+        n
+    }
+
+    /// Size of everything the block hash commits to: header, transaction count
+    /// and transactions, **without the seal**.
+    ///
+    /// This is what the block-size rule measures (SPEC §3.1 rule 1). The seal
+    /// is deliberately outside the header and the merkle root (DECISIONS D2)
+    /// and a BFT certificate legally carries anywhere from `quorum` to `n`
+    /// signatures, so counting it would make one block hash have several sizes
+    /// — and whether the block fit `max_block_size` would depend on which copy
+    /// a node received. The seal is bounded on its own instead, by
+    /// [`BlockSeal::max_data_len`] (DECISIONS D12).
+    pub fn consensus_size(&self) -> usize {
+        let mut n = HEADER_SIZE.saturating_add(4);
         for tx in &self.txs {
             n = n.saturating_add(tx.borsh_size());
         }
@@ -499,6 +539,41 @@ mod tests {
     fn empty_block_size_is_header_plus_count_plus_seal() {
         let b = Block::new(header(), vec![], BlockSeal::POW);
         assert_eq!(b.serialized_size(), 88 + 4 + 5);
+    }
+
+    #[test]
+    fn the_consensus_size_is_the_encoded_size_without_the_seal() {
+        // One block hash, several legal seals: the size the block-size rule
+        // measures must not move between them (DECISIONS D12).
+        let txs = vec![coinbase(), spend()];
+        let quorum_sized = Block::new(header(), txs.clone(), BlockSeal::bft(vec![9; 246]));
+        let full_sized = Block::new(header(), txs.clone(), BlockSeal::bft(vec![9; 378]));
+        let pow = Block::new(header(), txs, BlockSeal::POW);
+
+        assert_eq!(quorum_sized.consensus_size(), full_sized.consensus_size());
+        assert_eq!(quorum_sized.consensus_size(), pow.consensus_size());
+        assert_ne!(quorum_sized.serialized_size(), full_sized.serialized_size());
+
+        // And it really is the encoding minus the seal, on every one of them.
+        for b in [&quorum_sized, &full_sized, &pow] {
+            assert_eq!(
+                b.consensus_size(),
+                borsh::to_vec(b).unwrap().len() - b.seal.borsh_size(),
+                "consensus_size is the block without its seal"
+            );
+        }
+    }
+
+    #[test]
+    fn a_commit_certificate_is_bounded_by_the_validator_count() {
+        // borsh(BftCommit): 8 + 4 + 32 + 4 fixed, then 2 + 64 per signature.
+        assert_eq!(BlockSeal::max_data_len(0), 48);
+        assert_eq!(BlockSeal::max_data_len(4), 48 + 4 * 66);
+        assert_eq!(BlockSeal::max_data_len(7), 48 + 7 * 66);
+        // The bound is `n`, not the quorum: `verify_commit` accepts any count
+        // between them, so the largest legal certificate carries every key.
+        assert!(BlockSeal::max_data_len(7) > BlockSeal::max_data_len(5));
+        assert_eq!(BlockSeal::max_data_len(usize::MAX), usize::MAX, "saturates, never wraps");
     }
 
     #[test]

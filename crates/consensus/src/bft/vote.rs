@@ -73,9 +73,34 @@ impl VoteMsg {
     }
 }
 
-/// Digest a proposal is signed over.
-pub fn proposal_digest(vote: &VoteMsg) -> Hash32 {
-    tagged_hash(TAG_BFT_PROPOSAL, &vote.signing_bytes())
+/// Digest a proposal is signed over: the frozen [`VoteMsg`] **and**
+/// `pol_round`.
+///
+/// `pol_round` is not a hint. It selects which of Tendermint's rules 2 and 3 a
+/// receiver runs, so it is a control input, and an unsigned control input is a
+/// control input any relay owns. Leaving it out let an attacker holding no
+/// validator key copy a genuine proposal, flip the field, and have the copy
+/// still verify — poisoning the round's proposal slot, which
+/// [`BftMachine::step`](crate::BftMachine::step) fills once and keeps.
+///
+/// The preimage is `borsh(VoteMsg) || borsh(Option<u32>)` under
+/// `TAG_BFT_PROPOSAL`. Extending the preimage rather than the struct is what
+/// keeps [`VoteMsg`] frozen at [`VOTE_MSG_SIZE`] bytes for the prevotes,
+/// precommits and the commit certificate the contract pins (CONTRACT 6.5).
+pub fn proposal_digest(vote: &VoteMsg, pol_round: Option<u32>) -> Hash32 {
+    let mut preimage = vote.signing_bytes();
+    // Borsh's `Option<u32>`, written out: `0x00` for `None`, `0x01` followed
+    // by a little-endian `u32` for `Some`. Spelling it here rather than
+    // calling `borsh::to_vec` keeps the function total — there is no error
+    // path to swallow — and pins the encoding where a reader can check it.
+    match pol_round {
+        None => preimage.push(0u8),
+        Some(round) => {
+            preimage.push(1u8);
+            preimage.extend_from_slice(&round.to_le_bytes());
+        }
+    }
+    tagged_hash(TAG_BFT_PROPOSAL, &preimage)
 }
 
 /// Digest a prevote is signed over.
@@ -155,11 +180,12 @@ impl SignedVote {
 /// A block proposal for `(height, round)`.
 ///
 /// `pol_round` is the Tendermint `validRound`: the round at which the proposer
-/// claims it already saw a `2f+1` polka for this block. **It is a hint, and it
-/// is deliberately outside the signed preimage.** A receiver never acts on the
-/// claim; it acts only on a polka it has counted itself, so a proposer that
-/// lies about `pol_round` achieves nothing. Keeping it out of the preimage is
-/// what lets the signed message stay the frozen 48-byte [`VoteMsg`].
+/// claims it already saw a `2f+1` polka for this block. A receiver never acts
+/// on the *claim* — it acts only on a polka it has counted itself — but the
+/// claim still steers which rule runs, so it is **inside** the signed preimage
+/// (see [`proposal_digest`]). A proposer that over-claims a polka achieves
+/// nothing; a relay that rewrites the field on someone else's proposal would
+/// otherwise choose, for every honest node, whether that node prevotes at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Proposal {
     /// The height being proposed for.
@@ -182,6 +208,11 @@ impl Proposal {
         VoteMsg::new(chain_id, self.height, self.round, self.block_hash)
     }
 
+    /// The digest this proposal's signature must be over.
+    pub fn digest(&self, chain_id: ChainId) -> Hash32 {
+        proposal_digest(&self.vote(chain_id), self.pol_round)
+    }
+
     /// Sign a proposal.
     pub fn sign(
         key: &SecretKey,
@@ -199,7 +230,7 @@ impl Proposal {
             block_hash,
             pol_round,
             proposer,
-            signature: key.sign_deterministic(&proposal_digest(&vote)),
+            signature: key.sign_deterministic(&proposal_digest(&vote, pol_round)),
         }
     }
 
@@ -210,7 +241,7 @@ impl Proposal {
     /// [`ConsensusError::ValidatorIndexOutOfRange`] and
     /// [`ConsensusError::BadCommitSignature`].
     pub fn verify(&self, chain_id: ChainId, set: &ValidatorSet) -> Result<(), ConsensusError> {
-        set.verify(self.proposer, &proposal_digest(&self.vote(chain_id)), &self.signature)
+        set.verify(self.proposer, &self.digest(chain_id), &self.signature)
     }
 }
 

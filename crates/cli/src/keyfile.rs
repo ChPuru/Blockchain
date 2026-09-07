@@ -114,28 +114,54 @@ pub fn write_key_file(path: &Path, mnemonic: &Mnemonic) -> CliResult<()> {
     let mut body = Zeroizing::new(String::with_capacity(mnemonic.phrase().len().saturating_add(1)));
     body.push_str(mnemonic.phrase());
     body.push('\n');
-    std::fs::write(path, body.as_bytes()).map_err(|e| CliError::io(path, e))?;
-    restrict_permissions(path);
-    Ok(())
+    write_owner_only(path, body.as_bytes())
 }
 
-/// Narrow a secret file's permissions to the owner where the platform has the
-/// concept.
+/// Create `path` owner-only and write `bytes` into it.
 ///
-/// Best effort: a filesystem without the concept (FAT, some bind mounts) is
-/// not a reason to refuse to write the key, and the failure is logged rather
-/// than swallowed.
-fn restrict_permissions(path: &Path) {
+/// The mode goes on the `open` call rather than a `chmod` afterwards: between
+/// `std::fs::write` creating the file at `0o666 & ~umask` and a later
+/// `set_permissions`, the mnemonic is world-readable, and a descriptor opened
+/// in that window keeps its access afterwards because Unix checks permissions
+/// at `open` and never again. An existing file cannot take its mode from
+/// `open`, so that case is narrowed before the secret is written.
+///
+/// # Errors
+///
+/// [`CliError::Io`] naming the path.
+fn write_owner_only(path: &Path, bytes: &[u8]) -> CliResult<()> {
+    use std::io::Write as _;
+
+    if path.exists() {
+        restrict_permissions(path)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|e| CliError::io(path, e))?;
+    file.write_all(bytes).map_err(|e| CliError::io(path, e))
+}
+
+/// Narrow an *existing* secret file's permissions to its owner.
+///
+/// A failure is an error, not a warning: this runs before the mnemonic is
+/// written, so continuing would put the key in a file the operator has been
+/// told is owner-only when it is not. A freshly created file never reaches
+/// here — [`write_owner_only`] gets the mode from `open`.
+///
+/// # Errors
+///
+/// [`CliError::Io`] naming the path.
+fn restrict_permissions(path: &Path) -> CliResult<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "could not restrict key file permissions"
-            );
-        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| CliError::io(path, e))?;
     }
     #[cfg(not(unix))]
     {
@@ -145,6 +171,7 @@ fn restrict_permissions(path: &Path) {
         // inheriting.
         let _ = path;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -198,6 +225,30 @@ mod tests {
         let loaded = load_key_file(&path, Network::Devnet).unwrap();
         let expected = parse_key_material(PHRASE, Network::Devnet).unwrap();
         assert_eq!(loaded.public.as_bytes(), expected.public.as_bytes());
+    }
+
+    /// The mnemonic is the wallet. A 0644 key file on a shared host is a
+    /// published key, and narrowing it after the write is a window an
+    /// `open(2)` in a loop walks straight through.
+    #[cfg(unix)]
+    #[test]
+    fn a_key_file_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("validator.key");
+        write_key_file(&path, &a_mnemonic()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn rewriting_an_existing_key_file_replaces_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("validator.key");
+        std::fs::write(&path, b"an older, longer key file left behind by something else").unwrap();
+        write_key_file(&path, &a_mnemonic()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), PHRASE);
     }
 
     #[test]

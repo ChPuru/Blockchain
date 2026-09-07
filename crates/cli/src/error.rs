@@ -115,6 +115,14 @@ pub enum CliError {
     #[error(transparent)]
     Node(Box<ferrum_node::NodeError>),
 
+    /// The node already holds the transaction a command just built.
+    ///
+    /// Its own variant because it is the one failure that would otherwise look
+    /// like a success: the mempool answers "already in the pool" and
+    /// `sendrawtransaction` returns the txid, which reads as a second payment.
+    #[error("{0}")]
+    AlreadyBroadcast(String),
+
     /// Something that should not happen, reported rather than panicked on.
     #[error("{0}")]
     Internal(String),
@@ -143,6 +151,11 @@ impl CliError {
     /// A [`CliError::Internal`].
     pub fn internal(what: impl Into<String>) -> Self {
         CliError::Internal(what.into())
+    }
+
+    /// A [`CliError::AlreadyBroadcast`].
+    pub fn already_broadcast(what: impl Into<String>) -> Self {
+        CliError::AlreadyBroadcast(what.into())
     }
 }
 

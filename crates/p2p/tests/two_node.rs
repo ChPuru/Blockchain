@@ -426,3 +426,74 @@ async fn nodes_on_different_chains_connect_but_never_exchange_gossip() {
     a.stop().await;
     b.stop().await;
 }
+
+#[tokio::test]
+async fn one_peer_id_cannot_open_more_connections_than_the_per_peer_cap() {
+    // `max_peers` counts distinct identities, so it never rises for a single
+    // attacker: one keypair dialling ten thousand times is one entry in the
+    // peer map. Each surviving connection holds a Noise session and a yamux
+    // session with a four-megabyte receive window, so the ceiling that has to
+    // exist is per identity, not only per identity *count*.
+    let mut b = start(listen_config());
+    let b_addr = listen_addr(&mut b).await;
+    let b_peer = b.peer_id();
+
+    let mut a = start(listen_config());
+    let _ = listen_addr(&mut a).await;
+    let a_peer = a.peer_id();
+
+    let dials = usize::try_from(limits::MAX_CONNECTIONS_PER_PEER)
+        .expect("the cap fits a usize")
+        * 3;
+    for _ in 0..dials {
+        timeout(STEP, a.handle.dial(b_addr.clone()))
+            .await
+            .expect("a dial must be accepted")
+            .expect("a dial must be accepted");
+    }
+
+    // Let the dials land, then let the count settle: the cap is enforced when
+    // a connection is established, so the excess appears and is closed again.
+    let settled_on_a = settle(&a.handle, b_peer).await;
+    let settled_on_b = settle(&b.handle, a_peer).await;
+
+    assert_eq!(
+        settled_on_a,
+        limits::MAX_CONNECTIONS_PER_PEER,
+        "A holds {settled_on_a} connections to one peer id; the cap is {}",
+        limits::MAX_CONNECTIONS_PER_PEER
+    );
+    assert_eq!(
+        settled_on_b,
+        limits::MAX_CONNECTIONS_PER_PEER,
+        "B accepted {settled_on_b} connections from one peer id; the cap is {}",
+        limits::MAX_CONNECTIONS_PER_PEER
+    );
+
+    a.stop().await;
+    b.stop().await;
+}
+
+/// Poll `handle` until its connection count for `peer` stops changing.
+///
+/// The count is only meaningful once it is stable: a cap that is enforced on
+/// establishment lets the count overshoot for the moment between the
+/// connection arriving and being closed again.
+async fn settle(handle: &P2pHandle, peer: PeerId) -> u32 {
+    let mut last: Option<u32> = None;
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let peers = timeout(STEP, handle.peers())
+            .await
+            .expect("peers must answer")
+            .expect("peers must succeed");
+        let Some(info) = peers.iter().find(|p| p.peer_id == peer) else {
+            continue;
+        };
+        if last == Some(info.connections) && info.connections > 0 {
+            return info.connections;
+        }
+        last = Some(info.connections);
+    }
+    last.unwrap_or(0)
+}

@@ -189,6 +189,25 @@ pub enum ConsensusError {
         minimum: usize,
     },
 
+    /// The validator set admits two **disjoint** quorums, so two conflicting
+    /// blocks could each gather `2f + 1` signatures at one height.
+    ///
+    /// Quorum intersection — any two quorums share at least one validator — is
+    /// the entire basis for "this chain may halt; it will never fork" and for
+    /// [`ReorgBelowFinalized`](Self::ReorgBelowFinalized). With
+    /// `f = (n - 1) / 3` and quorum `2f + 1` it holds for every set size but
+    /// `n = 6`, where `f = 1`, the quorum is 3 and `3 + 3 = 6`. A single
+    /// Byzantine proposer is then enough to commit two different blocks at one
+    /// height, so this is a startup failure rather than a warning. Use
+    /// `n = 3f + 1`: 4, 7, 10, 13, ….
+    #[error("a validator set of {validators} with quorum {quorum} admits two disjoint quorums")]
+    NoQuorumIntersection {
+        /// How many validators were configured, `n`.
+        validators: usize,
+        /// The quorum that set produces, `2f + 1`.
+        quorum: usize,
+    },
+
     /// The validator set does not fit the `u16` index in a
     /// [`BftCommit`](crate::BftCommit).
     #[error("BFT validator set of {0} does not fit a u16 index")]

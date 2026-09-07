@@ -396,6 +396,52 @@ async fn submitblock_rejects_a_block_that_breaks_a_rule() {
     assert_eq!(err.code(), RpcErrorCode::BlockRejected.code());
 }
 
+/// A clock frozen at a chosen millisecond.
+#[derive(Debug)]
+struct At(u64);
+
+impl crate::context::Clock for At {
+    fn now_ms(&self) -> u64 {
+        self.0
+    }
+}
+
+#[test]
+fn submitblock_refuses_a_block_from_the_future_without_recording_it_invalid() {
+    // SPEC §3.2 rule 10. Gossip, sync and the miner all get this rule through
+    // `Relay`; `submitblock` does not go through `Relay`, so a block two hours
+    // ahead used to enter the chain here and be rejected by every peer.
+    let f = Fixture::build(2, false);
+    let mut block = f.chain.mine_to(&f.miner.script_pubkey(), Vec::new(), 7);
+    let honest_now = block.header.timestamp_ms;
+    let limit = f.chain.params.max_future_block_time_ms;
+    block.header.timestamp_ms = honest_now.saturating_add(limit).saturating_add(60_000);
+    block.header.nonce = 0;
+    block.header = crate::tests::fixture::seal(block.header);
+
+    // A node whose clock says "now" refuses it...
+    let early = crate::adapters::ChainHandle::with_clock(
+        Arc::clone(&f.chain.chain),
+        true,
+        Arc::new(At(honest_now)),
+    );
+    let err = crate::provider::ChainProvider::submit_block(&early, block.clone()).unwrap_err();
+    assert_eq!(err.code(), RpcErrorCode::BlockRejected);
+    assert!(err.detail().contains("future limit"), "{}", err.detail());
+    assert_eq!(f.tip_height(), 2, "a refused block must not become the tip");
+
+    // ...and the refusal recorded nothing, so the same block is accepted once
+    // the clock has caught up. A block marked invalid could never come back.
+    let later = crate::adapters::ChainHandle::with_clock(
+        Arc::clone(&f.chain.chain),
+        true,
+        Arc::new(At(block.header.timestamp_ms)),
+    );
+    let outcome = crate::provider::ChainProvider::submit_block(&later, block).unwrap();
+    assert!(outcome.is_accepted(), "outcome was {}", outcome.tag());
+    assert_eq!(f.tip_height(), 3);
+}
+
 #[tokio::test]
 async fn submitblock_rejects_hex_that_is_not_a_block() {
     let f = Fixture::build(1, false);
@@ -529,7 +575,9 @@ async fn a_signed_spend_travels_from_sendrawtransaction_to_a_block() {
     // Mine it, and the RPC layer should now find it in the chain rather than
     // in the pool.
     f.chain.mine_and_connect(&f.miner.script_pubkey(), vec![signed], 1_234);
-    let confirmed = crate::handlers::lookup::find_transaction(&*f.provider(), &expected)
+    let provider = f.provider();
+    let mut reader = crate::handlers::lookup::BlockReader::new(&*provider);
+    let confirmed = crate::handlers::lookup::find_transaction(&mut reader, &expected)
         .unwrap()
         .expect("the mined transaction is indexed");
     assert_eq!(confirmed.height, 4);

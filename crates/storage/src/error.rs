@@ -117,6 +117,26 @@ pub enum StorageError {
     #[error("the transaction/address index is disabled on this store")]
     IndexDisabled,
 
+    /// The reverse index is enabled but does not describe the active tip.
+    ///
+    /// `index_transactions` is a runtime flag, so a datadir can be written by
+    /// a run that maintained `tx_index`/`addr_index` and by a run that did
+    /// not. Answering from tables that were left behind by an earlier chain
+    /// state is worse than refusing: a caller cannot tell a stale
+    /// `TxLocation` from a current one. `meta.index_height` records what the
+    /// index really covers, and this is what a reader gets when it disagrees
+    /// with the tip.
+    #[error(
+        "the index covers {} but the tip is at height {tip_height}; run `chain reindex`",
+        .indexed_to.map_or_else(|| "no block".to_owned(), |h| format!("height {h}"))
+    )]
+    IndexIncomplete {
+        /// The height the index is complete to, or `None` for "no block".
+        indexed_to: Option<u64>,
+        /// The height of the active tip the index fails to describe.
+        tip_height: u64,
+    },
+
     /// A block carried more transactions than a `u32` index can name.
     ///
     /// Unreachable while `max_block_size` is a megabyte, but the index key
@@ -222,6 +242,16 @@ mod tests {
         let io = std::io::Error::new(std::io::ErrorKind::NotFound, "nope");
         let e: StorageError = io.into();
         assert!(matches!(e, StorageError::Db(_)), "{e:?}");
+    }
+
+    #[test]
+    fn index_incomplete_names_the_gap_and_the_cure() {
+        let e = StorageError::IndexIncomplete { indexed_to: Some(7), tip_height: 91 };
+        let text = e.to_string();
+        assert!(text.contains("height 7") && text.contains("91"), "{text}");
+        assert!(text.contains("chain reindex"), "{text}");
+        let empty = StorageError::IndexIncomplete { indexed_to: None, tip_height: 3 };
+        assert!(empty.to_string().contains("no block"), "{empty}");
     }
 
     #[test]

@@ -310,14 +310,32 @@ impl Keystore {
 
         let keys = derive_keys(passphrase, &salt, file.kdf.iterations);
 
-        // Order matters: the check value first, so a typo is reported as a
-        // typo. Both comparisons are constant-time.
-        if !bool::from(keys[64..].ct_eq(&stored_check)) {
-            return Err(WalletError::WrongPassphrase);
-        }
+        // Both comparisons are constant-time, and both are always evaluated.
+        //
+        // `check` is *not* inside the MAC, so on its own a mismatch cannot
+        // tell a mistyped passphrase from a damaged `check` field — and
+        // answering `WrongPassphrase` to the second case sends the user
+        // hunting for a passphrase that was never lost, with an intact wallet
+        // in front of them. The MAC settles it: its key is derived from the
+        // passphrase, so a valid tag proves the passphrase is right and
+        // therefore that `check` itself is the damaged field. It is only a
+        // hint about the passphrase; the MAC is the authority on the file.
+        let check_ok = bool::from(keys[64..].ct_eq(&stored_check));
         let expected_mac = compute_mac(&keys[32..64], &file, &ciphertext)?;
-        if !bool::from(expected_mac.ct_eq(&stored_mac)) {
-            return Err(WalletError::KeystoreCorrupt);
+        let mac_ok = bool::from(expected_mac.ct_eq(&stored_mac));
+        match (check_ok, mac_ok) {
+            (true, true) => {}
+            // The tag authenticates every field that matters, so open it and
+            // say so rather than losing the wallet over an advisory field.
+            (false, true) => tracing::warn!(
+                path = %path.display(),
+                "keystore check value does not match its contents; the MAC is intact, so the \
+                 passphrase is correct and only that field is damaged"
+            ),
+            // A wrong passphrase derives a wrong MAC key too, so this is the
+            // typo case and must keep reporting as one.
+            (false, false) => return Err(WalletError::WrongPassphrase),
+            (true, false) => return Err(WalletError::KeystoreCorrupt),
         }
 
         let plaintext = xor_keystream(&keys[..32], &nonce, &ciphertext);
@@ -379,6 +397,11 @@ impl Keystore {
     /// Written to a sibling temporary file and renamed, so a crash mid-write
     /// leaves the previous keystore intact rather than a truncated one. A
     /// truncated keystore is a lost wallet.
+    ///
+    /// The temporary file is the one that is created, so it is the one whose
+    /// permissions have to be right: `rename` carries the mode across, and a
+    /// mode set on the destination *after* the rename would leave a window in
+    /// which the ciphertext is world-readable. See [`write_private`].
     fn persist(&self) -> Result<(), WalletError> {
         if let Some(parent) = self.path.parent()
             && !parent.as_os_str().is_empty()
@@ -391,10 +414,49 @@ impl Keystore {
         let mut tmp = self.path.clone().into_os_string();
         tmp.push(".tmp");
         let tmp = PathBuf::from(tmp);
-        std::fs::write(&tmp, &json).map_err(|e| WalletError::io(&tmp, e))?;
+        write_private(&tmp, &json)?;
         std::fs::rename(&tmp, &self.path).map_err(|e| WalletError::io(&self.path, e))?;
         Ok(())
     }
+}
+
+/// Create `path` and write `bytes` to it, owner-only from the moment it exists.
+///
+/// `std::fs::write` creates with `0o666 & ~umask` — 0644 under the usual umask
+/// — and narrowing it afterwards is too late twice over: the file is
+/// world-readable for the length of the write, and a descriptor opened inside
+/// that window keeps its access after the mode change, because Unix checks
+/// permissions at `open` and never again. So the mode goes on the `open` call
+/// itself.
+///
+/// Windows has no `chmod`; the datadir's own ACL is the protection there, as
+/// it is for `node.key` (`crates/node/src/node/keys.rs`).
+fn write_private(path: &Path, bytes: &[u8]) -> Result<(), WalletError> {
+    use std::io::Write as _;
+
+    // `create_new` is what makes the mode load-bearing rather than advisory —
+    // it refuses to write into a file someone else created and pre-opened. A
+    // crash can leave our own temp file behind, though, and a leftover must
+    // not wedge the wallet permanently, so clear it first.
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(WalletError::io(path, e)),
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|e| WalletError::io(path, e))?;
+    file.write_all(bytes).map_err(|e| WalletError::io(path, e))?;
+    // The rename is only atomic with respect to the *previous* file; without
+    // this the new contents can still be lost to a power cut after it.
+    file.sync_all().map_err(|e| WalletError::io(path, e))?;
+    Ok(())
 }
 
 /// PBKDF2-HMAC-SHA512 into `enc_key || mac_key || check`.

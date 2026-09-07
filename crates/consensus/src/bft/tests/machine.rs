@@ -551,3 +551,158 @@ fn quorum_and_fault_tolerance_are_visible_on_the_machine() {
     assert_eq!(m.validators().len(), 7);
     assert_eq!(m.own_index(), Some(0));
 }
+
+// ---------------------------------------------------------------------------
+// `pol_round` is a signed control input, not a hint
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_relayed_proposal_with_a_mutated_pol_round_is_rejected() {
+    // `pol_round` selects which of rules 2 and 3 runs, so it is a control
+    // input, not a hint. If it is outside the signed preimage, any relay
+    // holding no validator key at all can flip it on a genuine proposal, and
+    // the poisoned copy still verifies. `on_proposal` keeps the first copy it
+    // sees for a round for ever, so the poisoned one is the one every rule is
+    // evaluated against — and `vr >= round` makes the node prevote nothing at
+    // all. Repeated every round, that halts the chain with zero keys.
+    let genuine = proposal(0, 0, 0, a(), None);
+    assert_eq!(genuine.verify(ChainId::DEVNET, &set(4)), Ok(()));
+
+    let mut poisoned = genuine;
+    poisoned.pol_round = Some(0);
+    assert!(
+        poisoned.verify(ChainId::DEVNET, &set(4)).is_err(),
+        "a proposal signature must cover pol_round"
+    );
+
+    let mut m = machine_for(3, 4);
+    m.step(BftEvent::NewHeight(0));
+    let before = m.ignored();
+    assert!(m.step(BftEvent::Proposal(poisoned)).is_empty(), "the forgery must not be acted on");
+    assert!(m.ignored() > before);
+    assert_eq!(m.state().step, Step::Propose);
+
+    // And it must not have squatted the round's proposal slot: the genuine
+    // copy arriving second is still the one prevoted.
+    let actions = m.step(BftEvent::Proposal(genuine));
+    let votes = prevotes_in(&actions);
+    assert_eq!(votes.len(), 1);
+    assert_eq!(votes[0].vote.block_hash, a(), "the genuine proposal still wins the round");
+}
+
+#[test]
+fn a_stripped_pol_round_cannot_downgrade_a_reproposal() {
+    // The same primitive in the other direction: strip `Some(vr)` to `None` on
+    // a re-proposal and every locked validator takes the rule-2 branch and
+    // prevotes nil for a block it would otherwise have unlocked onto.
+    let genuine = proposal(2, 0, 2, b(), Some(1));
+    assert_eq!(genuine.verify(ChainId::DEVNET, &set(4)), Ok(()));
+
+    let mut downgraded = genuine;
+    downgraded.pol_round = None;
+    assert!(
+        downgraded.verify(ChainId::DEVNET, &set(4)).is_err(),
+        "stripping the proof-of-lock round must break the signature"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The round window
+// ---------------------------------------------------------------------------
+
+#[test]
+fn votes_for_a_far_future_round_are_ignored() {
+    // A vote's round is unconstrained attacker input, and every accepted round
+    // becomes a live `RoundVotes` bucket that `decided()` and `skip_round()`
+    // rescan on every later event. One Byzantine validator signing a nil
+    // precommit at each of a hundred thousand rounds is ~11 MB of perfectly
+    // valid traffic that costs every honest node quadratic CPU and unbounded
+    // memory. Rule 12 only ever advances to the *lowest* qualifying round, so
+    // a bounded window above the current round is all it needs.
+    let mut m = machine_for(3, 4);
+    m.step(BftEvent::NewHeight(0));
+
+    let before = m.ignored();
+    assert!(m.step(BftEvent::Prevote(prevote(0, 0, 100_000, a()))).is_empty());
+    assert!(m.step(BftEvent::Precommit(precommit(0, 0, u32::MAX, a()))).is_empty());
+    assert_eq!(m.ignored(), before + 2, "both are dropped, not buffered");
+    assert_eq!(m.state().votes.total(VoteKind::Prevote, 100_000), 0);
+    assert_eq!(m.state().votes.total(VoteKind::Precommit, u32::MAX), 0);
+}
+
+#[test]
+fn a_proposal_for_a_far_future_round_is_ignored() {
+    // Same bucket-seeding attack through `self.proposals`, which is keyed by
+    // round and equally unbounded.
+    let mut m = machine_for(3, 4);
+    m.step(BftEvent::NewHeight(0));
+
+    let far = 100_000u32;
+    let proposer = set(4).proposer_index(0, far);
+    let before = m.ignored();
+    assert!(m.step(BftEvent::Proposal(proposal(proposer, 0, far, a(), None))).is_empty());
+    assert_eq!(m.ignored(), before + 1, "an unreachable round is not cached");
+}
+
+#[test]
+fn the_round_window_still_lets_a_behind_node_catch_up() {
+    // The bound must not cost liveness. Rule 12 only ever jumps to the lowest
+    // round above the current one that `f+1` validators are in, so the window
+    // has to be wide enough to see them — and it moves forward with the round,
+    // so a node caught up to the edge can immediately see the next window.
+    let mut m = machine_for(0, 4);
+    m.step(BftEvent::NewHeight(0));
+
+    let edge = MAX_ROUND_LOOKAHEAD;
+    m.step(BftEvent::Prevote(prevote(1, 0, edge, b())));
+    assert_eq!(m.state().votes.total(VoteKind::Prevote, edge), 1, "the far edge is admissible");
+    m.step(BftEvent::Prevote(prevote(2, 0, edge, b())));
+    assert_eq!(m.state().round, edge, "f + 1 validators at the edge still pull us over");
+
+    let next_edge = edge.saturating_mul(2);
+    m.step(BftEvent::Prevote(prevote(1, 0, next_edge, b())));
+    assert_eq!(
+        m.state().votes.total(VoteKind::Prevote, next_edge),
+        1,
+        "the window travels with the round"
+    );
+}
+
+#[test]
+fn skip_round_merges_both_vote_kinds_and_takes_the_lowest() {
+    // Rule 12 needs the *lowest* round above the current one that `f+1`
+    // distinct validators are in, counting a validator once even when it is
+    // heard in both steps. This walks the prevote and precommit maps together
+    // rather than collecting every round into a fresh set on each call, so it
+    // is worth pinning every branch of the merge.
+    let mut t = VoteTally::new();
+    let sig = Signature::from_bytes([0x01; 64]);
+
+    t.add(VoteKind::Prevote, 9, 0, hash(1), sig);
+    t.add(VoteKind::Precommit, 9, 1, hash(1), sig);
+    assert_eq!(t.skip_round(0, 2), Some(9), "two validators, split across the steps");
+
+    t.add(VoteKind::Prevote, 5, 2, hash(1), sig);
+    t.add(VoteKind::Precommit, 5, 2, hash(1), sig);
+    assert_eq!(t.skip_round(0, 2), Some(9), "one validator in two steps is one voter");
+
+    t.add(VoteKind::Precommit, 5, 3, hash(1), sig);
+    assert_eq!(t.skip_round(0, 2), Some(5), "and 5 is lower than 9");
+
+    assert_eq!(t.skip_round(5, 2), Some(9), "`current` is exclusive");
+    assert_eq!(t.skip_round(9, 2), None, "nothing above the highest round");
+    assert_eq!(t.skip_round(0, 3), None, "no round reaches a threshold of three");
+
+    // A round present in only one of the two maps is still found.
+    t.add(VoteKind::Prevote, 7, 0, hash(1), sig);
+    t.add(VoteKind::Prevote, 7, 1, hash(1), sig);
+    assert_eq!(t.skip_round(5, 2), Some(7));
+
+    t.add(VoteKind::Prevote, 11, 0, hash(1), sig);
+    t.add(VoteKind::Prevote, 11, 1, hash(1), sig);
+    assert_eq!(t.skip_round(9, 2), Some(11), "prevotes past the last precommit round");
+
+    t.add(VoteKind::Precommit, 13, 0, hash(1), sig);
+    t.add(VoteKind::Precommit, 13, 1, hash(1), sig);
+    assert_eq!(t.skip_round(11, 2), Some(13), "precommits past the last prevote round");
+}

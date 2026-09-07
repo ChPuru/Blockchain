@@ -218,6 +218,22 @@ impl Mempool {
     ///
     /// See [`crate::select`] for the algorithm and for what it does and does
     /// not re-check.
+    ///
+    /// # The pool's lock is released before the store is read
+    ///
+    /// Selection re-resolves every candidate against `view`, and `view` is the
+    /// UTXO set — a database read per input. Holding the pool's one lock
+    /// across that would block `accept` and, much worse,
+    /// `remove_confirmed`/`promote_orphans`, which sit on the block-acceptance
+    /// path: a miner building a template would stall block connection for as
+    /// long as the template took. So the candidate list is *copied* under the
+    /// lock and the lock is dropped before any storage work begins. The copy
+    /// is bounded by `max_bytes` and is far cheaper than the reads it lets run
+    /// unlocked.
+    ///
+    /// Selection is a snapshot either way: the pool can change the instant the
+    /// lock is released, and a template built from a slightly stale snapshot
+    /// is still a valid block.
     #[must_use]
     pub fn select_for_block(
         &self,
@@ -225,13 +241,17 @@ impl Mempool {
         view: &dyn StateView,
         height: u64,
     ) -> Vec<Transaction> {
-        let inner = self.inner.lock();
-        let ordered: Vec<(Txid, &MempoolEntry)> = inner
-            .by_fee
-            .iter()
-            .rev()
-            .filter_map(|k| inner.entries.get(&k.txid).map(|e| (k.txid, e)))
-            .collect();
+        let snapshot: Vec<(Txid, MempoolEntry)> = {
+            let inner = self.inner.lock();
+            inner
+                .by_fee
+                .iter()
+                .rev()
+                .filter_map(|k| inner.entries.get(&k.txid).map(|e| (k.txid, e.clone())))
+                .collect()
+        };
+        let ordered: Vec<(Txid, &MempoolEntry)> =
+            snapshot.iter().map(|(id, entry)| (*id, entry)).collect();
         select::select_for_block(&ordered, max_bytes, view, height, &self.cfg.params)
     }
 
@@ -283,24 +303,38 @@ impl Mempool {
     /// [`Mempool::accept`]'s own promotion cannot see. Returns the txids that
     /// made it into the pool, which are new to this node and should be
     /// relayed.
+    ///
+    /// # The expiry clock is not reset by this
+    ///
+    /// A candidate whose parents are still missing is re-orphaned by
+    /// `insert_one`, which stamps it with the height it is offered at. This
+    /// method is called on *every* accepted block, so trusting that stamp
+    /// would restart every waiting orphan's expiry clock once a block and
+    /// [`crate::OrphanPool::expire`] could never fire — the pool would stay
+    /// permanently full from one upload of transactions naming parents that
+    /// will never exist. The original `added_height` and arrival order are put
+    /// back through [`crate::OrphanPool::restore_age`].
     pub fn promote_orphans(&self, view: &dyn StateView, tip_height: u64, mtp_s: u64) -> Vec<Txid> {
         let mut inner = self.inner.lock();
         let waiting = inner.orphans.txids();
         let mut candidates = Vec::with_capacity(waiting.len());
         for id in &waiting {
             if let Some(e) = inner.orphans.take(id) {
-                candidates.push(e.tx);
+                candidates.push((*id, e.tx, e.added_height, e.seq));
             }
         }
 
         let mut roots = Vec::new();
-        for tx in candidates {
-            // A candidate whose parents are still missing is re-orphaned by
-            // `insert_one`, so this loop is safe to run over the whole set.
-            if let Ok(Admission::Added { txid: id, .. }) =
-                insert_one(&mut inner, &self.cfg, tx, view, tip_height, mtp_s)
-            {
-                roots.push(id);
+        for (id, tx, added_height, seq) in candidates {
+            match insert_one(&mut inner, &self.cfg, tx, view, tip_height, mtp_s) {
+                Ok(Admission::Added { txid: added, .. }) => roots.push(added),
+                // Still waiting: `insert_one` put it back with today's height,
+                // so put its own age back.
+                Ok(Admission::Orphaned { .. }) => {
+                    inner.orphans.restore_age(&id, added_height, seq);
+                }
+                Ok(Admission::AlreadyInPool { .. }) => {}
+                Err(e) => tracing::debug!(txid = %id, error = %e, "orphan failed re-evaluation"),
             }
         }
         let mut promoted = roots.clone();

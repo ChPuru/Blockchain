@@ -13,7 +13,7 @@ use ferrum_types::{Amount, Block, BlockHash, OutPoint, Transaction, Txid};
 use crate::error::RpcError;
 use crate::handlers::address::address_report;
 use crate::handlers::convert;
-use crate::handlers::lookup::{self, RECENT_BLOCKS, RECENT_TXS};
+use crate::handlers::lookup::{self, BlockReader, RECENT_BLOCKS, RECENT_TXS};
 use crate::provider::{ChainProvider, MempoolProvider};
 use crate::types::explorer::{
     AddressResponse, AddressTx, BlockResponse, BlockTxSummary, RecentBlock, RecentTx,
@@ -67,7 +67,7 @@ pub fn stats(
         utxo_count: chain.utxo_count()?,
         peers,
         recent_blocks,
-        recent_txs: recent_txs(chain, mempool, &blocks, tip_height)?,
+        recent_txs: recent_txs(&mut BlockReader::new(chain), mempool, &blocks, tip_height)?,
         faucet_enabled,
         finalized_height: chain.finalized_height(),
         total_work: hex::encode(total_work),
@@ -77,7 +77,7 @@ pub fn stats(
 
 /// Mempool transactions first, then the newest confirmed ones.
 fn recent_txs(
-    chain: &dyn ChainProvider,
+    reader: &mut BlockReader<'_>,
     mempool: &dyn MempoolProvider,
     blocks: &[Block],
     tip_height: u64,
@@ -104,7 +104,7 @@ fn recent_txs(
             out.push(RecentTx {
                 txid: lookup::txid_of(tx).to_hex(),
                 value: convert::total_output(tx)?.into(),
-                fee: tx_fee(chain, tx)?.into(),
+                fee: tx_fee(reader, tx)?.into(),
                 height: Some(height),
             });
         }
@@ -117,11 +117,11 @@ fn recent_txs(
 /// Zero for a coinbase, and zero on a node without the reverse index, where the
 /// funding outputs cannot be found. See
 /// [`crate::handlers::convert::transaction_fee`].
-fn tx_fee(chain: &dyn ChainProvider, tx: &Transaction) -> Result<Amount, RpcError> {
+fn tx_fee(reader: &mut BlockReader<'_>, tx: &Transaction) -> Result<Amount, RpcError> {
     if tx.is_coinbase() {
         return Ok(Amount::ZERO);
     }
-    let prevouts = lookup::resolve_prevouts(chain, tx)?;
+    let prevouts = lookup::resolve_prevouts(reader, tx)?;
     convert::transaction_fee(tx, &prevouts)
 }
 
@@ -138,6 +138,9 @@ pub fn block_view(chain: &dyn ChainProvider, id: &str) -> Result<BlockResponse, 
     let (entry, active, confirmations) = lookup::block_position(chain, &hash)?;
     let next = lookup::next_hash(chain, entry.height, active)?;
 
+    // One budget for the whole page. Every input of every transaction here
+    // resolves through the tx index, and a full block holds thousands of them.
+    let mut reader = BlockReader::new(chain);
     let mut txs = Vec::with_capacity(block.txs.len());
     for tx in &block.txs {
         txs.push(BlockTxSummary {
@@ -145,7 +148,7 @@ pub fn block_view(chain: &dyn ChainProvider, id: &str) -> Result<BlockResponse, 
             vin: tx.inputs.len(),
             vout: tx.outputs.len(),
             value: convert::total_output(tx)?.into(),
-            fee: tx_fee(chain, tx)?.into(),
+            fee: tx_fee(&mut reader, tx)?.into(),
             coinbase: tx.is_coinbase(),
         });
     }
@@ -178,13 +181,17 @@ pub fn tx_view(
     let txid = Txid(crate::error::parse_hash32(txid_str)?);
     let (_, tip_height) = chain.tip()?;
 
+    // One budget for the whole page: the spender scan below runs once per
+    // output, and without a shared allowance the cost is outputs x scan.
+    let mut reader = BlockReader::new(chain);
+
     let (tx, confirmed) = match mempool.get(&txid) {
         Some(entry) => (entry.tx, None),
         None => {
             if !chain.index_enabled() {
                 return Err(RpcError::index_disabled("the transaction page"));
             }
-            let found = lookup::find_transaction(chain, &txid)?
+            let found = lookup::find_transaction(&mut reader, &txid)?
                 .ok_or_else(|| RpcError::not_found(format!("no transaction {txid_str}")))?;
             let active = lookup::on_active_chain(chain, &found.block_hash, found.height)?;
             let confirmations = convert::confirmations(tip_height, found.height, active);
@@ -193,7 +200,7 @@ pub fn tx_view(
     };
 
     let network = chain.params().network;
-    let prevouts = lookup::resolve_prevouts(chain, &tx)?;
+    let prevouts = lookup::resolve_prevouts(&mut reader, &tx)?;
     let fee = convert::transaction_fee(&tx, &prevouts)?;
     let size = tx.serialized_size();
 
@@ -227,7 +234,7 @@ pub fn tx_view(
         let spent_by = if chain.coin(&out_point)?.is_some() {
             None
         } else {
-            lookup::find_spender(chain, &out_point, &output.script_pubkey, from_height)?
+            lookup::find_spender(&mut reader, &out_point, &output.script_pubkey, from_height)?
                 .map(|t| t.to_hex())
         };
         outputs.push(TxOutputView {

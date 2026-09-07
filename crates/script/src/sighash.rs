@@ -31,12 +31,21 @@
 //! - **`input_value`** commits to the amount being spent, which is what BIP-143
 //!   was written to fix: without it an offline signer cannot know what it is
 //!   authorising.
-//! - **`hash_prevouts` / `hash_sequences` / `hash_outputs`** are precomputed
-//!   digests, so signing `n` inputs is O(n) rather than Bitcoin's legacy O(n²).
+//! - **`hash_prevouts` / `hash_sequences` / `hash_outputs`** are mid-states over
+//!   the *whole transaction* and not over the input being signed, so signing or
+//!   checking `n` inputs is O(n) rather than Bitcoin's legacy O(n²) — provided
+//!   they are computed once per transaction. That is what [`SighashCache`] is
+//!   for, and it is not optional on a validation path: recomputing them inside
+//!   every signature check makes validation quadratic in transaction size,
+//!   which is the exact denial of service this preimage shape exists to remove.
+//!   [`signature_hash`] and [`sighash_preimage`] build a throwaway cache, so
+//!   they are the convenient form, not the fast one.
 //!
 //! `SIGHASH_SINGLE` with `input_index >= outputs.len()` is an **error** here.
 //! Bitcoin returns the constant `uint256(1)`, which is signable and has cost
 //! real money.
+
+use std::cell::OnceCell;
 
 use ferrum_crypto::{Signature, TAG_SIGHASH, tagged_hash};
 use ferrum_types::{Amount, ChainId, Hash32, Transaction};
@@ -165,10 +174,167 @@ pub fn encode_signature(sig: &Signature, ty: SigHashType) -> Vec<u8> {
     out
 }
 
+/// The transaction-wide mid-states of the preimage, computed at most once each.
+///
+/// `hash_prevouts`, `hash_sequences` and the `ALL` flavour of `hash_outputs`
+/// depend on the transaction and **not** on which input is being signed. That
+/// is the entire reason the preimage is shaped this way: hashing them once per
+/// transaction makes checking `n` signatures cost `O(n)` instead of Bitcoin's
+/// legacy `O(n²)`. Recomputing them inside every signature check gives the
+/// quadratic behaviour back — a 1 MB transaction of single-signature inputs
+/// re-hashes its own prevout list once per input — which is the denial of
+/// service BIP-143 exists to remove.
+///
+/// A cache belongs to the transaction it was built for. Hold one per
+/// transaction and hand it to every input's [`crate::ExecCtx`]; the VM checks
+/// [`SighashCache::is_for`] before trusting it, and a shared reference cannot
+/// alias a mutation, so an equal pointer means equal bytes.
+#[derive(Debug)]
+pub struct SighashCache<'a> {
+    tx: &'a Transaction,
+    prevouts: OnceCell<Hash32>,
+    sequences: OnceCell<Hash32>,
+    all_outputs: OnceCell<Hash32>,
+}
+
+impl<'a> SighashCache<'a> {
+    /// An empty cache for `tx`. Nothing is hashed until it is asked for.
+    pub fn new(tx: &'a Transaction) -> Self {
+        SighashCache {
+            tx,
+            prevouts: OnceCell::new(),
+            sequences: OnceCell::new(),
+            all_outputs: OnceCell::new(),
+        }
+    }
+
+    /// The transaction this cache was built for.
+    pub fn tx(&self) -> &'a Transaction {
+        self.tx
+    }
+
+    /// True when this cache was built for `tx` itself.
+    ///
+    /// Pointer identity, not equality: a `&Transaction` cannot alias a mutation
+    /// for as long as it is held, so the same address is the same bytes, and it
+    /// costs nothing to check on a validation path.
+    pub fn is_for(&self, tx: &Transaction) -> bool {
+        std::ptr::eq(self.tx, tx)
+    }
+
+    /// `tagged_hash(TAG_SIGHASH, every input's outpoint)`, memoised.
+    fn prevouts(&self) -> Hash32 {
+        *self.prevouts.get_or_init(|| hash_prevouts(self.tx))
+    }
+
+    /// `tagged_hash(TAG_SIGHASH, every input's sequence)`, memoised.
+    fn sequences(&self) -> Hash32 {
+        *self.sequences.get_or_init(|| hash_sequences(self.tx))
+    }
+
+    /// `tagged_hash(TAG_SIGHASH, every output)`, memoised.
+    fn all_outputs(&self) -> Result<Hash32, ScriptError> {
+        if let Some(digest) = self.all_outputs.get() {
+            return Ok(*digest);
+        }
+        let digest = hash_all_outputs(self.tx)?;
+        // Single-threaded by construction, so this cannot already be set.
+        let _ = self.all_outputs.set(digest);
+        Ok(digest)
+    }
+
+    /// Build the frozen preimage for one input of this transaction.
+    ///
+    /// # Errors
+    ///
+    /// [`ScriptError::InvalidInputIndex`] when `input_index` is not an index
+    /// into the transaction's inputs, and
+    /// [`ScriptError::SigHashSingleOutOfRange`] for a `SIGHASH_SINGLE` with no
+    /// matching output.
+    pub fn preimage(
+        &self,
+        input_index: usize,
+        script_code: &[u8],
+        input_value: Amount,
+        chain_id: ChainId,
+        ty: SigHashType,
+    ) -> Result<Vec<u8>, ScriptError> {
+        let tx = self.tx;
+        let input = tx.inputs.get(input_index).ok_or(ScriptError::InvalidInputIndex {
+            index: input_index,
+            inputs: tx.inputs.len(),
+        })?;
+        let index_u32 = u32::try_from(input_index).map_err(|_| ScriptError::InvalidInputIndex {
+            index: input_index,
+            inputs: tx.inputs.len(),
+        })?;
+
+        let hash_prevouts = if ty.is_anyonecanpay() { Hash32::ZERO } else { self.prevouts() };
+        let hash_sequences = if ty.is_anyonecanpay() || ty.is_none() || ty.is_single() {
+            Hash32::ZERO
+        } else {
+            self.sequences()
+        };
+        let hash_outputs = if ty.is_none() {
+            Hash32::ZERO
+        } else if ty.is_single() {
+            hash_single_output(tx, input_index)?
+        } else {
+            self.all_outputs()?
+        };
+
+        let outpoint = borsh::to_vec(&input.prev_out).map_err(|_| ScriptError::NumericOverflow)?;
+        let script_code_len =
+            u32::try_from(script_code.len()).map_err(|_| ScriptError::NumericOverflow)?;
+
+        let mut out = Vec::with_capacity(script_code.len().saturating_add(160));
+        out.extend_from_slice(&chain_id.to_u32().to_le_bytes());
+        out.extend_from_slice(&tx.version.to_le_bytes());
+        out.extend_from_slice(hash_prevouts.as_bytes());
+        out.extend_from_slice(hash_sequences.as_bytes());
+        out.extend_from_slice(&index_u32.to_le_bytes());
+        out.extend_from_slice(&outpoint);
+        out.extend_from_slice(&script_code_len.to_le_bytes());
+        out.extend_from_slice(script_code);
+        out.extend_from_slice(&input_value.to_grains().to_le_bytes());
+        out.extend_from_slice(&input.sequence.to_le_bytes());
+        out.extend_from_slice(hash_outputs.as_bytes());
+        out.extend_from_slice(&tx.lock_time.to_le_bytes());
+        out.push(ty.to_byte());
+        Ok(out)
+    }
+
+    /// The digest a BIP-340 signature is made over, for one input of this
+    /// transaction.
+    ///
+    /// # Errors
+    ///
+    /// As [`SighashCache::preimage`].
+    pub fn signature_hash(
+        &self,
+        input_index: usize,
+        script_code: &[u8],
+        input_value: Amount,
+        chain_id: ChainId,
+        ty: SigHashType,
+    ) -> Result<Hash32, ScriptError> {
+        let preimage = self.preimage(input_index, script_code, input_value, chain_id, ty)?;
+        Ok(tagged_hash(TAG_SIGHASH, &preimage))
+    }
+}
+
 /// Build the frozen sighash preimage.
 ///
 /// Exposed so a wallet, a test vector generator and the CLI can all show the
 /// exact bytes being signed rather than only the digest.
+///
+/// This builds a throwaway [`SighashCache`], so it recomputes the three
+/// mid-states every call. Anything signing or verifying more than one input of
+/// the same transaction should hold a [`SighashCache`] instead.
+///
+/// # Errors
+///
+/// As [`SighashCache::preimage`].
 pub fn sighash_preimage(
     tx: &Transaction,
     input_index: usize,
@@ -177,45 +343,14 @@ pub fn sighash_preimage(
     chain_id: ChainId,
     ty: SigHashType,
 ) -> Result<Vec<u8>, ScriptError> {
-    let input = tx
-        .inputs
-        .get(input_index)
-        .ok_or(ScriptError::InvalidInputIndex { index: input_index, inputs: tx.inputs.len() })?;
-    let index_u32 = u32::try_from(input_index).map_err(|_| ScriptError::InvalidInputIndex {
-        index: input_index,
-        inputs: tx.inputs.len(),
-    })?;
-
-    let hash_prevouts = if ty.is_anyonecanpay() { Hash32::ZERO } else { hash_prevouts(tx) };
-    let hash_sequences = if ty.is_anyonecanpay() || ty.is_none() || ty.is_single() {
-        Hash32::ZERO
-    } else {
-        hash_sequences(tx)
-    };
-    let hash_outputs = hash_outputs(tx, input_index, ty)?;
-
-    let outpoint = borsh::to_vec(&input.prev_out).map_err(|_| ScriptError::NumericOverflow)?;
-    let script_code_len =
-        u32::try_from(script_code.len()).map_err(|_| ScriptError::NumericOverflow)?;
-
-    let mut out = Vec::with_capacity(script_code.len().saturating_add(160));
-    out.extend_from_slice(&chain_id.to_u32().to_le_bytes());
-    out.extend_from_slice(&tx.version.to_le_bytes());
-    out.extend_from_slice(hash_prevouts.as_bytes());
-    out.extend_from_slice(hash_sequences.as_bytes());
-    out.extend_from_slice(&index_u32.to_le_bytes());
-    out.extend_from_slice(&outpoint);
-    out.extend_from_slice(&script_code_len.to_le_bytes());
-    out.extend_from_slice(script_code);
-    out.extend_from_slice(&input_value.to_grains().to_le_bytes());
-    out.extend_from_slice(&input.sequence.to_le_bytes());
-    out.extend_from_slice(hash_outputs.as_bytes());
-    out.extend_from_slice(&tx.lock_time.to_le_bytes());
-    out.push(ty.to_byte());
-    Ok(out)
+    SighashCache::new(tx).preimage(input_index, script_code, input_value, chain_id, ty)
 }
 
 /// The digest a BIP-340 signature is made over.
+///
+/// # Errors
+///
+/// As [`SighashCache::preimage`].
 pub fn signature_hash(
     tx: &Transaction,
     input_index: usize,
@@ -224,12 +359,34 @@ pub fn signature_hash(
     chain_id: ChainId,
     ty: SigHashType,
 ) -> Result<Hash32, ScriptError> {
-    let preimage = sighash_preimage(tx, input_index, script_code, input_value, chain_id, ty)?;
-    Ok(tagged_hash(TAG_SIGHASH, &preimage))
+    SighashCache::new(tx).signature_hash(input_index, script_code, input_value, chain_id, ty)
 }
+
+// Counts the transaction-wide digests actually computed.
+//
+// Thread-local rather than global so parallel tests cannot interfere, and
+// `cfg(test)` so it costs nothing in a real build. It exists so a test can
+// assert that the three mid-states are hashed once per transaction rather than
+// once per signature check — the difference between linear and quadratic
+// validation.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static DIGESTS_COMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Record that a transaction-wide digest was computed from scratch.
+#[cfg(test)]
+fn count_digest() {
+    DIGESTS_COMPUTED.with(|c| c.set(c.get().saturating_add(1)));
+}
+
+/// The same, compiled away outside tests.
+#[cfg(not(test))]
+fn count_digest() {}
 
 /// `tagged_hash(TAG_SIGHASH, borsh(outpoint) for every input)`.
 fn hash_prevouts(tx: &Transaction) -> Hash32 {
+    count_digest();
     let mut buf = Vec::with_capacity(tx.inputs.len().saturating_mul(36));
     for input in &tx.inputs {
         // Borsh into a `Vec` is infallible; `OutPoint` is 36 fixed bytes.
@@ -242,6 +399,7 @@ fn hash_prevouts(tx: &Transaction) -> Hash32 {
 
 /// `tagged_hash(TAG_SIGHASH, u32 LE sequence for every input)`.
 fn hash_sequences(tx: &Transaction) -> Hash32 {
+    count_digest();
     let mut buf = Vec::with_capacity(tx.inputs.len().saturating_mul(4));
     for input in &tx.inputs {
         buf.extend_from_slice(&input.sequence.to_le_bytes());
@@ -249,29 +407,30 @@ fn hash_sequences(tx: &Transaction) -> Hash32 {
     tagged_hash(TAG_SIGHASH, &buf)
 }
 
-/// `ALL`: every output. `SINGLE`: only `outputs[input_index]`. `NONE`: zeros.
-fn hash_outputs(
-    tx: &Transaction,
-    input_index: usize,
-    ty: SigHashType,
-) -> Result<Hash32, ScriptError> {
-    if ty.is_none() {
-        return Ok(Hash32::ZERO);
-    }
-    if ty.is_single() {
-        let output = tx.outputs.get(input_index).ok_or(ScriptError::SigHashSingleOutOfRange {
-            input_index,
-            outputs: tx.outputs.len(),
-        })?;
-        let bytes = borsh::to_vec(output).map_err(|_| ScriptError::NumericOverflow)?;
-        return Ok(tagged_hash(TAG_SIGHASH, &bytes));
-    }
+/// `tagged_hash(TAG_SIGHASH, borsh(output) for every output)` — the `ALL`
+/// flavour, which is the one that is worth caching because it walks the whole
+/// transaction.
+fn hash_all_outputs(tx: &Transaction) -> Result<Hash32, ScriptError> {
+    count_digest();
     let mut buf = Vec::new();
     for output in &tx.outputs {
         let bytes = borsh::to_vec(output).map_err(|_| ScriptError::NumericOverflow)?;
         buf.extend_from_slice(&bytes);
     }
     Ok(tagged_hash(TAG_SIGHASH, &buf))
+}
+
+/// `SIGHASH_SINGLE`: the one output at the input's own index.
+///
+/// Not cached: it hashes a single output, and it depends on the input index, so
+/// there is no transaction-wide mid-state to share.
+fn hash_single_output(tx: &Transaction, input_index: usize) -> Result<Hash32, ScriptError> {
+    let output = tx
+        .outputs
+        .get(input_index)
+        .ok_or(ScriptError::SigHashSingleOutOfRange { input_index, outputs: tx.outputs.len() })?;
+    let bytes = borsh::to_vec(output).map_err(|_| ScriptError::NumericOverflow)?;
+    Ok(tagged_hash(TAG_SIGHASH, &bytes))
 }
 
 #[cfg(test)]

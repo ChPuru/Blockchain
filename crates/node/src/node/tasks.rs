@@ -21,6 +21,18 @@
 //! block into an orphan. Inbound *sync requests* are answered on a bounded pool
 //! of tasks instead: they are pure reads, order does not matter, and a peer
 //! doing initial sync must not stall block relay for everyone else.
+//!
+//! That promise is only kept if the loop never *waits* for a serve slot. The
+//! permit is taken with `try_acquire_owned`, never awaited: an `await` here
+//! parks the loop itself, so it stops calling `events.recv()` and every gossip
+//! message behind the request in the same FIFO is delayed too — and once the
+//! event queue fills, the p2p worker sheds them. A shed gossip message is
+//! never validated, so `report_validation` is never called, and gossipsub is
+//! in explicit-validation mode: the block is neither accepted locally nor
+//! forwarded. One peer keeping the serve pool busy would turn this node into a
+//! black hole for block propagation. When no permit is free the request is
+//! dropped instead; libp2p reports a response omission and the peer retries,
+//! which is what it already does for a dropped response.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -163,10 +175,22 @@ pub struct P2pLoop {
 /// Drive the p2p event stream until `cancel` fires.
 pub async fn run_p2p(
     ctx: P2pLoop,
-    mut events: mpsc::Receiver<P2pEvent>,
+    events: mpsc::Receiver<P2pEvent>,
     cancel: CancellationToken,
 ) {
-    let serves = Arc::new(Semaphore::new(MAX_CONCURRENT_SERVES));
+    run_p2p_with(ctx, events, cancel, Arc::new(Semaphore::new(MAX_CONCURRENT_SERVES))).await;
+}
+
+/// [`run_p2p`] with the serve pool supplied by the caller.
+///
+/// Split out so a test can saturate the pool and prove the loop keeps draining
+/// anyway; production always calls [`run_p2p`].
+async fn run_p2p_with(
+    ctx: P2pLoop,
+    mut events: mpsc::Receiver<P2pEvent>,
+    cancel: CancellationToken,
+    serves: Arc<Semaphore>,
+) {
     loop {
         let event = tokio::select! {
             () = cancel.cancelled() => break,
@@ -212,27 +236,52 @@ async fn handle_event(ctx: &P2pLoop, serves: &Arc<Semaphore>, event: P2pEvent) {
             }
         }
         P2pEvent::InboundRequest { peer, request, responder } => {
-            let Ok(permit) = Arc::clone(serves).acquire_owned().await else {
-                // The semaphore is closed only at shutdown; drop the responder
-                // and libp2p reports an omission rather than hanging the peer.
-                return;
-            };
-            let chain = Arc::clone(&ctx.chain);
-            tokio::spawn(async move {
-                let response = match blocking(move || serve::answer(&chain, &request)).await {
-                    Ok(response) => response,
-                    Err(e) => {
-                        tracing::warn!(%peer, error = %e, "could not build a sync response");
-                        ferrum_p2p::SyncResponse::NotFound
-                    }
-                };
-                if let Err(e) = responder.respond(response) {
-                    tracing::debug!(%peer, error = %e, "could not send a sync response");
-                }
-                drop(permit);
-            });
+            spawn_serve(ctx, serves, peer, request, responder);
         }
     }
+}
+
+/// Answer one inbound sync request on the serve pool, or shed it.
+///
+/// **Synchronous on purpose.** This is the branch of the event loop that a
+/// peer controls the arrival rate of, and an `await` in it parks the loop:
+/// nothing else in the event channel is drained while it waits, gossip
+/// included. Taking the permit with `try_acquire_owned` makes that
+/// structurally impossible — there is no await to park on — at the price of
+/// dropping a request when all `MAX_CONCURRENT_SERVES` slots are busy.
+/// Dropping the responder makes libp2p report a response omission, which is
+/// indistinguishable to the peer from a dropped response, and it retries.
+fn spawn_serve(
+    ctx: &P2pLoop,
+    serves: &Arc<Semaphore>,
+    peer: ferrum_p2p::PeerId,
+    request: ferrum_p2p::SyncRequest,
+    responder: ferrum_p2p::SyncResponder,
+) {
+    let Ok(permit) = Arc::clone(serves).try_acquire_owned() else {
+        tracing::debug!(
+            %peer,
+            permits = MAX_CONCURRENT_SERVES,
+            "serve pool busy; shedding an inbound sync request"
+        );
+        ctx.metrics.shed();
+        drop(responder);
+        return;
+    };
+    let chain = Arc::clone(&ctx.chain);
+    tokio::spawn(async move {
+        let response = match blocking(move || serve::answer(&chain, &request)).await {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::warn!(%peer, error = %e, "could not build a sync response");
+                ferrum_p2p::SyncResponse::NotFound
+            }
+        };
+        if let Err(e) = responder.respond(response) {
+            tracing::debug!(%peer, error = %e, "could not send a sync response");
+        }
+        drop(permit);
+    });
 }
 
 /// Validate one gossip payload and decide what to tell gossipsub.
@@ -384,6 +433,72 @@ mod tests {
         cancel.cancel();
         drop(rx);
         assert!(cancel.is_cancelled());
+    }
+
+    #[test]
+    fn the_serve_branch_is_synchronous_so_it_cannot_park_the_loop() {
+        // The event loop drives every event through one `await`. If the serve
+        // branch were `async` it could await a permit and stop the loop
+        // draining gossip, which is the whole failure this shape prevents.
+        // Coercing to a plain `fn` pointer only compiles while it stays
+        // synchronous.
+        let f: fn(
+            &P2pLoop,
+            &Arc<Semaphore>,
+            ferrum_p2p::PeerId,
+            ferrum_p2p::SyncRequest,
+            ferrum_p2p::SyncResponder,
+        ) = spawn_serve;
+        let _ = f;
+    }
+
+    #[tokio::test]
+    async fn a_saturated_serve_pool_does_not_stop_the_event_loop_draining() {
+        let chain = chain();
+        let relay = relay(Arc::clone(&chain));
+        let (hints, _hint_rx) = mpsc::channel(SYNC_HINT_CAPACITY);
+        let ctx = P2pLoop {
+            relay: Arc::clone(&relay),
+            chain,
+            handle: unreachable_handle(),
+            hints,
+            bans: Arc::new(PeerBans::new()),
+            metrics: Arc::clone(relay.metrics()),
+        };
+
+        // Every serve permit is already held: the pool is saturated and stays
+        // that way for the whole test.
+        let serves = Arc::new(Semaphore::new(MAX_CONCURRENT_SERVES));
+        let held = Arc::clone(&serves)
+            .acquire_many_owned(u32::try_from(MAX_CONCURRENT_SERVES).unwrap())
+            .await
+            .unwrap();
+
+        // A one-slot channel, so a loop that stops calling `recv` blocks the
+        // third send rather than quietly buffering it.
+        let (tx, rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run_p2p_with(ctx, rx, cancel.clone(), Arc::clone(&serves)));
+
+        let peer = PeerId::random();
+        for n in 0..4 {
+            let event = P2pEvent::InboundRequest {
+                peer,
+                request: ferrum_p2p::SyncRequest::GetTip,
+                responder: ferrum_p2p::SyncResponder::abandoned(peer),
+            };
+            tokio::time::timeout(Duration::from_secs(10), tx.send(event))
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("the event loop stopped draining at request {n} with the pool full")
+                })
+                .expect("the event loop is still running");
+        }
+
+        drop(held);
+        cancel.cancel();
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(20), task).await.unwrap().unwrap();
     }
 
     #[tokio::test]

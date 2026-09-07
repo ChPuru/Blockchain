@@ -3,7 +3,9 @@
 use ferrum_crypto::merkle_leaf;
 use ferrum_script::{ExecCtx, ScriptLimits, verify};
 use ferrum_storage::{EmptyView, header_hash, txid};
-use ferrum_types::{Amount, BlockHash, BlockSeal, ChainParams, Network, Script, Transaction};
+use ferrum_types::{
+    Amount, BlockHash, BlockSeal, ChainParams, Network, Script, Transaction, ValidatorId,
+};
 
 use crate::apply::apply_block;
 use crate::ctx::BlockCtx;
@@ -86,8 +88,11 @@ fn the_genesis_output_is_provably_unspendable() {
         tx: &spender,
         input_index: 0,
         input_value: cb.outputs[0].value,
+        input_height: Some(0),
+        input_mtp_s: Some(0),
         block_height: 1,
         block_mtp_s: 0,
+        sighash_cache: None,
         limits: ScriptLimits::CONSENSUS,
     };
     assert!(verify(&Script::EMPTY, script, &ctx).is_err());
@@ -116,13 +121,18 @@ fn each_network_has_its_own_genesis_hash() {
 fn the_commitment_moves_when_any_consensus_parameter_moves() {
     let base = ChainParams::devnet();
     let baseline = genesis_commitment(&base);
-    let mutations: [fn(&mut ChainParams); 6] = [
+    let mutations: [fn(&mut ChainParams); 8] = [
         |p| p.halving_interval = 1,
         |p| p.coinbase_maturity = 7,
         |p| p.max_block_size = 2_000_000,
         |p| p.target_spacing_ms = 60_000,
         |p| p.asert_halflife_s = 60,
         |p| p.genesis_nonce = 1,
+        // The fork schedule decides which engine validates every block at and
+        // above the activation height. Two nodes that disagree about it fork
+        // permanently, so it must not be possible for them to share a genesis.
+        |p| p.bft_activation_height = Some(500_000),
+        |p| p.bft_validators = vec![ValidatorId::from_bytes([1; 32])],
     ];
     for mutate in mutations {
         // Mutate a clone of the shipped set rather than going through
@@ -133,6 +143,48 @@ fn the_commitment_moves_when_any_consensus_parameter_moves() {
         mutate(&mut changed);
         assert_ne!(genesis_commitment(&changed), baseline);
         assert_ne!(genesis_hash(&changed), genesis_hash(&base));
+    }
+}
+
+#[test]
+fn the_commitment_pins_the_validator_order() {
+    // `validators.rs`: "the order of `ChainParams::bft_validators` is
+    // consensus-critical: reordering the list is a hard fork" — the proposer
+    // schedule and every commit signature index are positional. Two operators
+    // whose files list the same keys in different orders must therefore fail to
+    // share a genesis, not discover it at the first commit.
+    let a = ValidatorId::from_bytes([0xaa; 32]);
+    let b = ValidatorId::from_bytes([0xbb; 32]);
+
+    let mut forward = ChainParams::devnet();
+    forward.bft_activation_height = Some(10);
+    forward.bft_validators = vec![a, b];
+
+    let mut reversed = forward.clone();
+    reversed.bft_validators = vec![b, a];
+
+    assert_ne!(genesis_commitment(&forward), genesis_commitment(&reversed));
+    assert_ne!(genesis_hash(&forward), genesis_hash(&reversed));
+
+    // And a set that is a prefix of another is not the same set either.
+    let mut shorter = forward.clone();
+    shorter.bft_validators = vec![a];
+    assert_ne!(genesis_commitment(&forward), genesis_commitment(&shorter));
+}
+
+#[test]
+fn a_scheduled_activation_is_not_the_same_chain_as_no_activation() {
+    // `None` must not encode as any reachable height: a node with no BFT
+    // schedule and a node that activates BFT at height 0 are different chains.
+    let none = ChainParams::devnet();
+    for activation in [0u64, 1, 500_000, u64::MAX] {
+        let mut scheduled = none.clone();
+        scheduled.bft_activation_height = Some(activation);
+        assert_ne!(
+            genesis_commitment(&scheduled),
+            genesis_commitment(&none),
+            "activation at {activation} must not collide with no activation"
+        );
     }
 }
 
@@ -195,18 +247,18 @@ fn the_published_genesis_hashes_are_these() {
     let expected = [
         (
             ChainParams::mainnet(),
-            "6bfa4fee9e522a6071b5d7d04fc400144d9f519ba95b78d37346f7c597c4436c",
-            "9967df4f7957e4bb8b629dc5cbe60411c3ec4058f88a3136e832805ddd409405",
+            "8bfd7dc0fc73ed481b3891f433aee3f50f14a847a6de66ccbf2af3f4942ce229",
+            "42dc1be3c6357b0ca832e5b5865ce1d4005ef6f8316cd8246884b9278d2d42c4",
         ),
         (
             ChainParams::testnet(),
-            "9edeafc16709d76a957c0b11587881cb0161dd19069fc25025fbdc4b4ff6e516",
-            "c63d0a3f08a4dd8d451c70ab01ab5f9fccb8e9b44fdb538a6a1cf56e1f6e8650",
+            "0271729260045601a991075df86e689acf74eec3aaa930b64513ada36ef18440",
+            "a689d3978bcd0c2c0fa4d4d2b1cedb22efdbde5eda1d935b2f2d8eea987c2ff5",
         ),
         (
             ChainParams::devnet(),
-            "9167643790fc744081aa3656d33a4e02fc122b729198716563b2ee60db428444",
-            "8fedad9c3ec385af18086c5cb8596f6aa7c017886c40289688a311eacd40030a",
+            "7747ccde4c1bae8d7f91913e9bcf2f5288c19a54ba0444ed7d21c49f9715008f",
+            "db335655845805ab6351958c5dedfe3e0ec8f3e94745b1716fc42e425a135654",
         ),
     ];
     for (params, hash, merkle) in expected {
@@ -224,3 +276,4 @@ fn the_published_genesis_hashes_are_these() {
         );
     }
 }
+

@@ -346,3 +346,58 @@ fn the_pool_is_shareable_across_threads() {
     let reader = std::sync::Arc::clone(&shared);
     std::thread::spawn(move || assert_eq!(reader.len(), 1)).join().expect("the reader thread ran");
 }
+
+#[test]
+fn promote_orphans_does_not_reset_a_waiting_orphans_expiry_clock() {
+    // `Relay::after_tip_move` calls `promote_orphans` on every accepted block.
+    // An orphan whose parents never arrive must still age out; if promotion
+    // re-stamps it with the current tip height it can never expire, and the
+    // pool stays permanently full from one upload.
+    let pool = Mempool::new(cfg().with_expiry_blocks(5));
+    let view = ferrum_storage::MapView::new();
+    let orphan = tx(&[unknown_out(9, 0)], &[10]);
+    pool.accept(orphan.clone(), &view, 10, 0).expect("held");
+
+    for height in 11..=15 {
+        assert!(pool.promote_orphans(&view, height, 0).is_empty());
+        assert_eq!(pool.orphan_count(), 1, "it is still waiting at height {height}");
+    }
+
+    // Admitted at 10 with a five-block window: height 15 is exactly the point
+    // it must be collected at.
+    assert_eq!(pool.expire(15), vec![id(&orphan)]);
+    assert_eq!(pool.orphan_count(), 0);
+}
+
+#[test]
+fn a_chain_longer_than_the_ancestor_limit_is_refused() {
+    use crate::tests::support::ascending_fee_chain;
+
+    let op = unknown_out(1, 0);
+    let view = view_with(&[(op, coin(1_000_000, 1, false))]);
+    let pool = Mempool::new(cfg().with_max_ancestors(5));
+    let chain = ascending_fee_chain(op, 1_000_000, 6);
+
+    // Five deep is the limit: the fifth transaction counts itself plus four
+    // in-pool ancestors.
+    for t in chain.iter().take(5) {
+        pool.accept(t.clone(), &view, 10, 0).expect("within the limit");
+    }
+    let err = pool.accept(chain[5].clone(), &view, 10, 0).expect_err("six is over the limit");
+    assert!(matches!(err, MempoolError::TooManyAncestors { count: 6, max: 5 }), "{err}");
+    assert_eq!(pool.len(), 5);
+}
+
+#[test]
+fn an_ancestor_package_larger_than_the_byte_limit_is_refused() {
+    use crate::tests::support::padded_tx;
+
+    let (view, ops) = funds(1, 100_000);
+    let pool = Mempool::new(cfg().with_max_ancestor_bytes(200));
+    let parent = padded_tx(&[ops[0]], &[99_000], 80);
+    let child = padded_tx(&[out(&parent, 0)], &[98_000], 80);
+    pool.accept(parent.clone(), &view, 10, 0).expect("a lone transaction is its own package");
+    let err = pool.accept(child, &view, 10, 0).expect_err("the package is over the byte limit");
+    assert!(matches!(err, MempoolError::AncestorPackageTooLarge { .. }), "{err}");
+    assert_eq!(pool.len(), 1);
+}

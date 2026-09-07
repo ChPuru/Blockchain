@@ -2,6 +2,7 @@
 
 use core::sync::atomic::AtomicBool;
 
+use ferrum_crypto::Signature;
 use ferrum_types::{Block, BlockHash, BlockHeader, BlockSeal, ChainParams, CompactTarget, Hash32};
 
 use super::*;
@@ -325,7 +326,7 @@ fn finality_follows_the_last_recorded_commit() {
     let p = params(4);
     let e = BftEngine::new(p.clone(), None).unwrap();
     let commit = commit_signed_by(&p, &[0, 1, 2], 41, 3, hash(0x33));
-    e.record_commit(commit.clone());
+    e.record_commit(commit.clone()).unwrap();
     assert_eq!(e.finalized_height(&TestView::devnet()), Some(41));
     assert_eq!(e.last_commit(), Some(commit));
 }
@@ -336,8 +337,8 @@ fn recorded_finality_only_moves_forward() {
     // would reopen a reorg the chain has already refused.
     let p = params(4);
     let e = BftEngine::new(p.clone(), None).unwrap();
-    e.record_commit(commit_signed_by(&p, &[0, 1, 2], 41, 0, hash(0x33)));
-    e.record_commit(commit_signed_by(&p, &[0, 1, 2], 7, 0, hash(0x34)));
+    e.record_commit(commit_signed_by(&p, &[0, 1, 2], 41, 0, hash(0x33))).unwrap();
+    e.record_commit(commit_signed_by(&p, &[0, 1, 2], 7, 0, hash(0x34))).unwrap();
     assert_eq!(e.finalized_height(&TestView::devnet()), Some(41));
 }
 
@@ -467,4 +468,107 @@ fn a_block_validated_under_one_engine_stays_valid_across_the_fork() {
         router.bft().unwrap().validate_seal(&block, &view),
         Err(ConsensusError::WrongEngine { expected: BlockSeal::ENGINE_BFT, actual: 0 })
     );
+}
+
+// ---------------------------------------------------------------------------
+// Finality is only ever raised by something that was checked
+// ---------------------------------------------------------------------------
+
+#[test]
+fn record_commit_refuses_an_unverified_certificate() {
+    // `record_commit` is public, self-describing and takes a certificate
+    // straight from its caller. Raising `finalized` from one that was never
+    // verified is irreversible — there is no API that lowers it — so a single
+    // garbage certificate claiming height u64::MAX makes `check_reorg` refuse
+    // every reorg at every depth for the life of the process. `seal` already
+    // runs `verify_commit` before touching the same two fields; so must this.
+    let p = params(4);
+    let e = BftEngine::new(p, None).unwrap();
+    let bogus = BftCommit::new(
+        u64::MAX,
+        0,
+        hash(0x99),
+        vec![
+            (0, Signature::from_bytes([0x11; 64])),
+            (1, Signature::from_bytes([0x22; 64])),
+            (2, Signature::from_bytes([0x33; 64])),
+        ],
+    );
+
+    assert!(matches!(
+        e.record_commit(bogus),
+        Err(ConsensusError::BadCommitSignature { index: 0, .. })
+    ));
+    assert_eq!(
+        e.finalized_height(&TestView::devnet()),
+        None,
+        "an unverified certificate must not move finality"
+    );
+    assert_eq!(e.last_commit(), None, "nor become the last commit");
+}
+
+/// A view whose tip is real but whose header table cannot be read.
+///
+/// This is what a transient storage error looks like through [`HeaderView`],
+/// which has nowhere to report one: `StoreHeaderView` logs it and returns
+/// `None`. Failing closed is right for the difficulty rule, where "unknown"
+/// means "reject"; for finality the polarity is inverted, and a missing answer
+/// silently removes the guard that stops a committed prefix being unwound.
+#[derive(Debug)]
+struct TornView {
+    params: ChainParams,
+    tip: (BlockHash, u64),
+}
+
+impl crate::engine::HeaderView for TornView {
+    fn params(&self) -> &ChainParams {
+        &self.params
+    }
+    fn header_by_hash(&self, _: &BlockHash) -> Option<BlockHeader> {
+        None
+    }
+    fn header_at_height(&self, _: u64) -> Option<BlockHeader> {
+        None
+    }
+    fn height_of(&self, _: &BlockHash) -> Option<u64> {
+        None
+    }
+    fn tip(&self) -> (BlockHash, u64) {
+        self.tip
+    }
+    fn median_time_past(&self, _: &BlockHash) -> Option<u64> {
+        None
+    }
+}
+
+#[test]
+fn an_unreadable_tip_header_does_not_erase_finality() {
+    let e = engine(4);
+    let torn = TornView { params: params(4), tip: (hash(0x77), 150) };
+    assert_eq!(
+        e.finalized_height(&torn),
+        Some(150),
+        "a header read that failed must not read as 'nothing is final'"
+    );
+}
+
+#[test]
+fn a_genuinely_empty_view_finalises_nothing() {
+    // The other half: a zero tip hash really is an empty chain, and claiming
+    // finality over it would be a lie in the other direction.
+    let e = engine(4);
+    let empty = TornView { params: params(4), tip: (BlockHash::ZERO, 0) };
+    assert_eq!(e.finalized_height(&empty), None);
+}
+
+#[test]
+fn record_commit_refuses_a_short_quorum() {
+    // Two genuine signatures out of four is not 2f+1. Accepting it would
+    // finalise a height that no quorum ever agreed on.
+    let p = params(4);
+    let e = BftEngine::new(p.clone(), None).unwrap();
+    let short = commit_signed_by(&p, &[0, 1], 12, 0, hash(0x55));
+    assert_eq!(e.record_commit(short), Err(ConsensusError::QuorumNotReached { have: 2, need: 3 }));
+    assert_eq!(e.finalized_height(&TestView::devnet()), None);
+    assert_eq!(e.last_commit(), None);
 }
