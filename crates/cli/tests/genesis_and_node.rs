@@ -3,10 +3,19 @@
 //!
 //! `genesis mine` is the command `RUNNING.md` §4 tells an operator to run
 //! before launching a network, and CONTRACT §13.1 fixes its last line as
-//! `nonce=<n> hash=<hex>`. The header it produces must satisfy its own target
-//! — otherwise the first node to start would reject its own genesis — and it
-//! must equal the block `ferrum-chain` independently computes from the same
-//! parameters, or every joining node would disagree with the published hash.
+//! `nonce=<n> hash=<hex>`. The header it produces must satisfy the target it
+//! was given, and — this is the whole point of the command — feeding the nonce
+//! it prints back into `ChainParams` must make `ferrum-chain` compute exactly
+//! the hash it printed. That round trip is the operator workflow: grind, paste
+//! the nonce, publish the hash.
+//!
+//! What is deliberately **not** asserted is that the *shipped* `genesis_nonce`
+//! is already a solution. SPEC §2 exempts genesis from proof-of-work
+//! validation — it has no parent to be validated against — so every network
+//! ships nonce `0`, and no network's genesis header meets its own target.
+//! Devnet used to look like an exception only because its old `pow_limit`
+//! accepted about half of all hashes; retuning it to `0x1e00ffff` made devnet
+//! behave like mainnet, which is what it is for.
 
 use assert_cmd::Command;
 use ferrum_consensus::{CompactTarget, compact_to_target, hash_meets_target};
@@ -53,12 +62,24 @@ fn the_mined_devnet_genesis_satisfies_its_own_target() {
 }
 
 #[test]
-fn the_mined_devnet_genesis_is_the_one_a_node_computes() {
+fn the_mined_devnet_nonce_reproduces_the_hash_a_node_computes() {
+    // `RUNNING.md` §4: grind, paste the nonce into `ChainParams`, publish the
+    // hash. This is that round trip. It is the property that matters, and it is
+    // stronger than comparing against the shipped `genesis_nonce`, because the
+    // nonce is *inside* the block it seals — it is committed to by the
+    // `OP_RETURN` payload, so it moves the coinbase, the Merkle root and the
+    // header hash together. A grinder that changed any one of them
+    // independently would fail here.
     let assert =
         cli().args(["--json", "genesis", "mine", "--network", "devnet"]).assert().success();
     let json: Value = serde_json::from_slice(&assert.get_output().stdout).expect("json");
-    let params = Network::Devnet.params();
+
+    let nonce: u64 = json["nonce"].as_str().expect("a nonce").parse().expect("a decimal nonce");
+    let mut params = Network::Devnet.params();
+    params.genesis_nonce = nonce;
+
     assert_eq!(json["hash"], ferrum_chain::genesis_hash(&params).to_string());
+    assert_eq!(json["merkle_root"], ferrum_chain::genesis_header(&params).merkle_root.to_hex());
 }
 
 #[test]

@@ -382,11 +382,13 @@ mod tests {
     }
 
     #[test]
-    fn fixed_vector_207fffff_is_the_devnet_genesis_target() {
+    fn fixed_vector_207fffff_is_the_largest_representable_target() {
         // The largest value the compact form can hold: a 23-bit mantissa at
-        // exponent 32, i.e. 0x7fffff * 2^232. Note this is *not* the devnet
-        // `pow_limit` array (0x7fff..ff): the compact encoding truncates, so
-        // the genesis target is slightly harder than the limit.
+        // exponent 32, i.e. 0x7fffff * 2^232. It used to be devnet's genesis
+        // target, and is now only the fixture target the chain and simulator
+        // test suites mine at; devnet ships `0x1e00ffff`. Note this is *not*
+        // the 0x7fff..ff array it looks like: the compact encoding truncates,
+        // so the expanded target is slightly harder than that limit.
         let t = compact_to_target(CompactTarget(0x207f_ffff)).unwrap();
         assert_eq!(
             t.to_string(),

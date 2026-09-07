@@ -195,6 +195,16 @@ pub fn reference_check_transaction_sanity(tx: &Transaction) -> Result<(), Valida
 fn reference_check_header(block: &Block, ctx: &BlockCtx) -> Result<(), ValidationError> {
     let header = &block.header;
 
+    // The version rule is read **before** the genesis exemption. SPEC §2 lists
+    // exactly three things genesis is exempt from — proof-of-work validation
+    // against the parent, the difficulty transition and median time past — and
+    // the version is not one of them; it fixes `genesis.header.version = 1`.
+    // The order is observable for a genesis block that also names a parent, so
+    // it is written the same way here and in `ferrum_chain::apply_block`.
+    if header.version < MIN_BLOCK_VERSION {
+        return Err(ValidationError::Header(ConsensusError::BadVersion(header.version)));
+    }
+
     // SPEC §2: genesis has no parent, so it is exempt from the proof-of-work
     // comparison against one, from the difficulty transition and from median
     // time past. What it is not exempt from is having a null parent.
@@ -206,10 +216,6 @@ fn reference_check_header(block: &Block, ctx: &BlockCtx) -> Result<(), Validatio
             }));
         }
         return Ok(());
-    }
-
-    if header.version < MIN_BLOCK_VERSION {
-        return Err(ValidationError::Header(ConsensusError::BadVersion(header.version)));
     }
 
     let parent_hash = reference_block_hash(&ctx.prev_header);

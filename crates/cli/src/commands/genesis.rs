@@ -180,9 +180,23 @@ mod tests {
     use super::*;
     use ferrum_types::Network;
 
+    /// A target these unit tests can grind in a try or two.
+    ///
+    /// Devnet's shipped `bits` are `0x1e00ffff` — about `2^24` candidates, and
+    /// each candidate here rebuilds the coinbase and the Merkle root because
+    /// the nonce is inside the block it seals. That is several seconds per
+    /// solve in an unoptimised build, and none of the properties below is about
+    /// devnet's *difficulty*: they are about the message, the timestamp, the
+    /// chain id and the encoding. `0x207fffff` accepts about half of all
+    /// header hashes, so the search costs nothing and the property under test
+    /// is unchanged. The one test that really is about devnet's shipped target
+    /// is `the_mined_devnet_genesis_satisfies_its_own_target`, in
+    /// `tests/genesis_and_node.rs`, which drives the real binary.
+    const EASY_BITS: &str = "0x207fffff";
+
     #[test]
-    fn devnet_genesis_is_found_and_satisfies_its_own_target() {
-        let out = mine("devnet", None, None, None, 0, 1 << 20).unwrap();
+    fn a_ground_genesis_satisfies_the_target_it_was_given() {
+        let out = mine("devnet", None, None, Some(EASY_BITS), 0, 1 << 20).unwrap();
         let bare = out.bare.clone().unwrap();
         assert!(bare.starts_with("nonce="), "{bare}");
         assert!(bare.contains(" hash="), "{bare}");
@@ -194,30 +208,39 @@ mod tests {
 
     #[test]
     fn the_default_message_reproduces_the_block_a_node_computes() {
-        // With no overrides the grinder must land on exactly the genesis
-        // `ferrum_chain` derives from the same parameters, or a freshly
+        // The candidate the grinder builds at a given nonce must be exactly the
+        // genesis `ferrum_chain` derives from the same parameters, or a freshly
         // launched node would disagree with the value published in the README.
+        //
+        // Asserted on `candidate` rather than on a solved `mine` run, because
+        // the shipped `genesis_nonce` is **not** a solution: SPEC §2 exempts
+        // genesis from proof-of-work validation, so every network ships nonce
+        // `0` and no network's genesis header meets its own target. What must
+        // hold is that the two constructions agree at whatever nonce they are
+        // handed — `tests/genesis_and_node.rs` asserts the same thing end to
+        // end, at the nonce the grinder actually finds.
         let params = Network::Devnet.params();
-        let out = mine("devnet", None, None, None, params.genesis_nonce, 1).unwrap();
-        assert_eq!(out.json["hash"], ferrum_chain::genesis_hash(&params).to_string());
-        assert_eq!(
-            out.json["merkle_root"],
-            ferrum_chain::genesis_header(&params).merkle_root.to_hex()
-        );
+        let message = genesis_message(&params);
+        let (coinbase, header) = candidate(&params, &message).unwrap();
+
+        assert_eq!(header_hash(&header), ferrum_chain::genesis_hash(&params));
+        assert_eq!(header, ferrum_chain::genesis_header(&params));
+        assert_eq!(coinbase, ferrum_chain::genesis_coinbase(&params));
     }
 
     #[test]
     fn a_custom_message_changes_the_hash() {
-        let plain = mine("devnet", None, None, None, 0, 1 << 20).unwrap();
-        let custom = mine("devnet", Some("hello ferrum"), None, None, 0, 1 << 20).unwrap();
+        let plain = mine("devnet", None, None, Some(EASY_BITS), 0, 1 << 20).unwrap();
+        let custom =
+            mine("devnet", Some("hello ferrum"), None, Some(EASY_BITS), 0, 1 << 20).unwrap();
         assert_ne!(plain.json["hash"], custom.json["hash"]);
         assert_eq!(custom.json["message"], "hello ferrum");
     }
 
     #[test]
     fn a_custom_timestamp_changes_the_hash() {
-        let a = mine("devnet", None, Some(1_700_000_000_000), None, 0, 1 << 20).unwrap();
-        let b = mine("devnet", None, Some(1_700_000_001_000), None, 0, 1 << 20).unwrap();
+        let a = mine("devnet", None, Some(1_700_000_000_000), Some(EASY_BITS), 0, 1 << 20).unwrap();
+        let b = mine("devnet", None, Some(1_700_000_001_000), Some(EASY_BITS), 0, 1 << 20).unwrap();
         assert_ne!(a.json["hash"], b.json["hash"]);
         assert_eq!(a.json["timestamp_ms"], 1_700_000_000_000_u64);
     }
@@ -225,9 +248,17 @@ mod tests {
     #[test]
     fn each_network_grinds_a_different_genesis() {
         // The `OP_RETURN` commitment is what stops two networks that differ
-        // only in chain id from sharing a genesis hash.
-        let dev = mine("devnet", None, None, None, 0, 1 << 20).unwrap();
+        // only in chain id from sharing a genesis hash. Grinding all three at
+        // the same easy target is what makes that comparison possible at all:
+        // at their shipped targets mainnet is out of reach here, and a test
+        // that only looked at devnet could not see a collision.
+        let dev = mine("devnet", None, None, Some(EASY_BITS), 0, 1 << 20).unwrap();
+        let test = mine("testnet", None, None, Some(EASY_BITS), 0, 1 << 20).unwrap();
+        let main = mine("mainnet", None, None, Some(EASY_BITS), 0, 1 << 20).unwrap();
         assert_eq!(dev.json["chain_id"], 3);
+        assert_ne!(dev.json["hash"], test.json["hash"]);
+        assert_ne!(dev.json["hash"], main.json["hash"]);
+        assert_ne!(test.json["hash"], main.json["hash"]);
     }
 
     #[test]
@@ -258,7 +289,7 @@ mod tests {
 
     #[test]
     fn the_solved_block_serialises() {
-        let out = mine("devnet", None, None, None, 0, 1 << 20).unwrap();
+        let out = mine("devnet", None, None, Some(EASY_BITS), 0, 1 << 20).unwrap();
         let hex_body = out.json["block_hex"].as_str().unwrap();
         assert!(!hex_body.is_empty());
         let raw = hex::decode(hex_body).unwrap();

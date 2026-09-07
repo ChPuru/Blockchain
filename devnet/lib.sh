@@ -17,6 +17,18 @@ set -uo pipefail
 export MSYS2_ARG_CONV_EXCL="*"
 export MSYS_NO_PATHCONV=1
 
+# Filesystem paths must be converted to Windows form by hand, because
+# MSYS2_ARG_CONV_EXCL="*" above turns off the automatic conversion for EVERY
+# argument. That exclusion is required for multiaddrs (`/ip4/...` would become
+# `C:/Program Files/Git/ip4/...`), but it also means a Unix path like
+# `/d/repo/devnet/data/node1` reaches the Windows binary unconverted and is
+# resolved against the current drive as `D:\depo\...` — a second, invisible
+# tree that `down.sh --clean` never deletes, so a stale store survives every
+# clean and the node refuses to start on a genesis mismatch.
+winpath() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
+}
+
 DEVNET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$DEVNET_DIR/.." && pwd)"
 DATA_ROOT="${FERRUM_DEVNET_DATA:-$DEVNET_DIR/data}"
@@ -132,7 +144,7 @@ start_node() {
 
     local args=(
         --network devnet
-        --datadir "$dir"
+        --datadir "$(winpath "$dir")"
         --rpc-listen "127.0.0.1:$(rpc_port "$i")"
         --p2p-listen "/ip4/127.0.0.1/tcp/$(p2p_port "$i")"
         --explorer-listen "127.0.0.1:$(explorer_port "$i")"

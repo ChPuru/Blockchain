@@ -207,8 +207,13 @@ impl ChainParams {
             min_relay_fee_per_kb: Amount::from_grains(1_000),
             genesis_timestamp_ms: GENESIS_TIMESTAMP_MS,
             genesis_bits,
-            // Ground by `chain-cli genesis mine` when a network is launched;
-            // on devnet almost any nonce satisfies the limit, including zero.
+            // Zero on every network, and deliberately not ground. SPEC 2
+            // exempts genesis from proof-of-work validation — it has no parent
+            // to be validated against — so the nonce buys nothing but a
+            // prettier hash, and `genesis_commitment` covers it, so choosing
+            // one is a parameter change like any other. `chain-cli genesis
+            // mine` exists for an operator launching a *new* network who wants
+            // a solved header; `RUNNING.md` 4 describes that round trip.
             genesis_nonce: 0,
             bft_activation_height: None,
             bft_validators: Vec::new(),

@@ -116,15 +116,26 @@ fn a_coinbase_spent_exactly_at_maturity_is_accepted() {
     let params = devnet();
     let parent = parent_header(PARENT_MS, &params);
     let prev = header_hash(&parent);
-    let ctx = ctx_at(101, &parent, MTP_S, &params);
+    // The first height at which the spend is legal, derived from the
+    // parameters: a coin mined at height 1 matures at `1 + maturity`. Written
+    // out as a constant it would silently stop being the boundary the moment
+    // devnet's maturity was retuned, which is exactly what happened when it
+    // went from 100 to 10.
+    let coin_height = 1;
+    let exactly = coin_height + params.coinbase_maturity;
+    let ctx = ctx_at(exactly, &parent, MTP_S, &params);
     let funded = OutPoint::new(Txid(Hash32::from_bytes([18; 32])), 0);
-    let pre = map_view(&[(funded, coin(amount(1_000), 1, true))]);
+    let pre = map_view(&[(funded, coin(amount(1_000), coin_height, true))]);
 
     let tx = spend(&[funded], &[(amount(900), any_spend_script())]);
-    let reward = params.block_subsidy(101).checked_add(amount(100)).unwrap();
+    let reward = params.block_subsidy(exactly).checked_add(amount(100)).unwrap();
     let block =
-        block_of(vec![coinbase(101, reward, b"n"), tx], prev, BLOCK_MS, params.genesis_bits);
-    assert!(apply_block(&pre, &block, &ctx).is_ok());
+        block_of(vec![coinbase(exactly, reward, b"n"), tx], prev, BLOCK_MS, params.genesis_bits);
+    assert!(
+        apply_block(&pre, &block, &ctx).is_ok(),
+        "{coin_height} + {} = {exactly}, the first legal height",
+        params.coinbase_maturity
+    );
 }
 
 #[test]
@@ -158,6 +169,41 @@ fn an_input_sum_outside_the_money_range_is_rejected() {
     assert_eq!(
         apply_block(&pre, &block, &ctx),
         Err(ValidationError::InputSumOverflow { tx_index: 1 })
+    );
+}
+
+#[test]
+fn maturity_is_checked_for_every_input_before_the_input_sum() {
+    // CONTRACT §8.1 rule 7 states the per-transaction rules as an ordered list
+    // over the whole transaction — resolve, then maturity, then value — not as
+    // one interleaved pass per input. The two readings agree on every
+    // transaction that breaks a single rule and disagree here, where the second
+    // input already pushes the sum out of the money range and the third is an
+    // immature coinbase. SPEC §3.4 makes the choice observable, so it is pinned
+    // rather than left to whichever loop shape an implementation happens to
+    // use; the reference executor in `testing/sim` reads it the same way.
+    let params = devnet();
+    let (_, prev, ctx) = scene(&params);
+    let a = OutPoint::new(Txid(Hash32::from_bytes([71; 32])), 0);
+    let b = OutPoint::new(Txid(Hash32::from_bytes([71; 32])), 1);
+    let young = OutPoint::new(Txid(Hash32::from_bytes([72; 32])), 0);
+    let pre = map_view(&[
+        (a, coin(Amount::MAX_MONEY, 0, false)),
+        (b, coin(Amount::MAX_MONEY, 0, false)),
+        (young, coin(amount(1_000), 1, true)),
+    ]);
+    let tx = spend(&[a, b, young], &[(amount(1), any_spend_script())]);
+    let block = block_with(vec![coinbase(1, amount(1), b"n"), tx], prev, &params);
+    assert_eq!(
+        apply_block(&pre, &block, &ctx),
+        Err(ValidationError::ImmatureCoinbaseSpend {
+            tx_index: 1,
+            out_point: young,
+            coin_height: 1,
+            spend_height: 1,
+            maturity: params.coinbase_maturity,
+        }),
+        "every input's maturity is judged before any input's value"
     );
 }
 

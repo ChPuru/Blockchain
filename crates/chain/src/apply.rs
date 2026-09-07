@@ -128,16 +128,27 @@ pub fn apply_block(
         // §4.2.1 — resolve every input against the overlay. A coin spent by an
         // earlier transaction in this same block reads back as absent, so a
         // double spend inside one block lands here, on the second spender.
+        //
+        // The three phases below are separate loops over the whole transaction
+        // rather than one interleaved pass, because CONTRACT §8.1 rule 7 states
+        // them as an ordered list — resolve, maturity, value — and the
+        // difference is observable whenever a transaction breaks two of them at
+        // once (SPEC §3.4). Interleaved, a transaction whose second input
+        // overflows the sum and whose third is an immature coinbase would be
+        // rejected for the overflow here and for the immaturity by the
+        // reference executor.
         let mut coins: Vec<Coin> = Vec::with_capacity(tx.inputs.len());
-        let mut inputs_total = Amount::ZERO;
         for input in &tx.inputs {
             let coin = overlay
                 .get_coin(&input.prev_out)
                 .map_err(|e| ValidationError::view(&e))?
                 .ok_or(ValidationError::MissingInput { tx_index, out_point: input.prev_out })?;
+            coins.push(coin);
+        }
 
-            // §4.2.2 — coinbase maturity. Spending a coinbase too early is
-            // invalid, not deferred: a block is judged at the height it claims.
+        // §4.2.2 — coinbase maturity. Spending a coinbase too early is
+        // invalid, not deferred: a block is judged at the height it claims.
+        for (input, coin) in tx.inputs.iter().zip(coins.iter()) {
             if coin.is_coinbase {
                 let mature_at = coin
                     .height
@@ -153,15 +164,17 @@ pub fn apply_block(
                     });
                 }
             }
+        }
 
-            // §4.2.5 — the input sum must not overflow and must stay money.
+        // §4.2.5 — the input sum must not overflow and must stay money.
+        let mut inputs_total = Amount::ZERO;
+        for coin in &coins {
             inputs_total = inputs_total
                 .checked_add(coin.value)
                 .ok_or(ValidationError::InputSumOverflow { tx_index })?;
             if !inputs_total.is_valid_money() {
                 return Err(ValidationError::InputSumOverflow { tx_index });
             }
-            coins.push(coin);
         }
 
         // §4.2.6 — sum(inputs) >= sum(outputs). The difference is the fee.
