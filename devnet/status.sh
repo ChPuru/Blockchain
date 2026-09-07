@@ -28,6 +28,32 @@ if [ "$uniq_tips" -eq 1 ]; then
 elif [ "$uniq_tips" -eq 0 ]; then
     echo "$(c_red 'no nodes responding')"
 else
-    echo "$(c_red "DIVERGED") — $uniq_tips distinct tips. Expected during a partition; a bug otherwise."
-    echo "$(c_dim 'Fork choice is by cumulative work, not height, so the taller chain need not win.')"
+    # Differing TIPS are not proof of a fork. This script polls nodes one at a
+    # time while blocks arrive every second or so, so a node one block behind
+    # its neighbour is a measurement artefact, not a divergence. The honest
+    # question is whether the nodes agree at a height every one of them has
+    # certainly seen.
+    lowest=""
+    for i in $(seq 1 "$NODES"); do
+        node_running "$i" || continue
+        h="$(node_height "$i")"
+        [ -z "$h" ] && continue
+        if [ -z "$lowest" ] || [ "$h" -lt "$lowest" ]; then lowest="$h"; fi
+    done
+    agreed=""
+    if [ -n "$lowest" ] && [ "$lowest" -gt 2 ]; then
+        probe=$((lowest - 2))
+        agreed="$(for i in $(seq 1 "$NODES"); do
+            node_running "$i" || continue
+            json_field "$(rpc "$i" getblockhash "[$probe]")" result
+        done | grep -v '^$' | sort -u | wc -l | tr -d ' ')"
+    fi
+    if [ "$agreed" = "1" ]; then
+        echo "$(c_green 'CONVERGED') — all nodes agree at height $probe."
+        echo "$(c_dim 'The tips differ only because blocks arrive faster than four nodes can be polled.')"
+    else
+        echo "$(c_red "DIVERGED") — $uniq_tips distinct tips, and they disagree at height ${probe:-?}."
+        echo "$(c_dim 'Expected during a partition; a bug otherwise. Fork choice is by cumulative')"
+        echo "$(c_dim 'work, not height, so the taller chain need not win.')"
+    fi
 fi

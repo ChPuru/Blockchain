@@ -340,6 +340,26 @@ fn a_genesis_block_with_a_parent_is_rejected() {
 }
 
 #[test]
+fn genesis_is_not_exempt_from_the_version_rule() {
+    // SPEC §2 lists exactly three exemptions — proof-of-work validation against
+    // the parent, the difficulty transition and median time past — and fixes
+    // `genesis.header.version = 1`. So the version is read *before* the
+    // exemption, and a genesis block that also names a parent is rejected for
+    // its version rather than for its parent. The reference executor in
+    // `testing/sim` reads it in the same order; it used to check the exemption
+    // first and would have accepted this block.
+    let params = devnet();
+    let ctx = BlockCtx::new(0, BlockHeader::default(), 0, params.clone());
+    let mut block = genesis_block(&params);
+    block.header.version = 0;
+    block.header.prev_hash = BlockHash(Hash32::from_bytes([1; 32]));
+    assert_eq!(
+        apply_block(&EmptyView, &block, &ctx),
+        Err(ValidationError::Header(ConsensusError::BadVersion(0)))
+    );
+}
+
+#[test]
 fn the_genesis_coinbase_must_still_commit_to_height_zero() {
     let params = devnet();
     let ctx = BlockCtx::new(0, BlockHeader::default(), 0, params.clone());
