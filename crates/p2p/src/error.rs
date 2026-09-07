@@ -147,6 +147,21 @@ impl P2pError {
         )
     }
 
+    /// Whether this failure is only "there was nobody in the mesh to send to".
+    ///
+    /// Gossipsub reports `InsufficientPeers` for a publish with no mesh peers
+    /// on the topic. For a node that is alone — a solo devnet, or any node in
+    /// the seconds before its first peer connects — that is the *expected*
+    /// state, not a fault, and logging it at warn level once per block buries
+    /// the publish failures that do matter. Callers log this at debug and
+    /// everything else at warn.
+    pub fn is_no_peers(&self) -> bool {
+        match self {
+            P2pError::Publish { reason, .. } => reason.contains("InsufficientPeers"),
+            _ => false,
+        }
+    }
+
     /// Whether this failure means the remote peer violated the protocol, and so
     /// should have its gossip score lowered or be disconnected.
     pub fn is_peer_fault(&self) -> bool {
@@ -183,6 +198,27 @@ impl From<P2pError> for io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_mesh_is_recognised_so_a_solo_node_does_not_warn_per_block() {
+        // gossipsub's PublishError Displays as its Debug form, so the reason
+        // string is the bare variant name. A test pins that, because the whole
+        // predicate is a string match against another crate's Display.
+        let no_peers = P2pError::Publish {
+            topic: "ferrum/3/blocks/v1".to_owned(),
+            reason: libp2p::gossipsub::PublishError::InsufficientPeers.to_string(),
+        };
+        assert!(no_peers.is_no_peers());
+        assert!(no_peers.is_transient(), "it resolves as soon as a peer connects");
+        assert!(!no_peers.is_peer_fault());
+
+        let too_large = P2pError::Publish {
+            topic: "ferrum/3/blocks/v1".to_owned(),
+            reason: libp2p::gossipsub::PublishError::MessageTooLarge.to_string(),
+        };
+        assert!(!too_large.is_no_peers(), "a real publish failure still warns");
+        assert!(!P2pError::ServiceStopped.is_no_peers());
+    }
 
     #[test]
     fn frame_too_large_is_a_peer_fault_not_transient() {

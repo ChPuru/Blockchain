@@ -289,6 +289,7 @@ pub fn address_view(
         utxo_count: report.utxo_count(),
         tx_count: report.tx_count(),
         transactions,
+        complete: report.complete,
     })
 }
 

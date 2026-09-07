@@ -305,6 +305,7 @@ end to end.
 | `genesis hash mismatch` on startup | your `ChainParams` differ from the network's | you are on a different chain — that is the check working |
 | Balance is 0 after mining | coinbase outputs are immature for 100 blocks | `chain-cli wallet balance` shows `immature` separately |
 | `getbalance` returns an error | the node was started without `--index` | restart with `--index`; a reindex is required |
+| `--p2p-listen ... is not a valid libp2p multiaddr`, showing a path like `C:/Program Files/Git/ip4/...` | Git Bash / MSYS2 rewrote the multiaddr into a Windows path | `export MSYS2_ARG_CONV_EXCL="*"` before running the binary. `devnet/lib.sh` already does this; it bites only when you invoke `chaind` by hand from Git Bash |
 | Blocks are never gossiped | gossipsub `max_transmit_size` too small for your block size | the default 64 KiB is overridden to 4 MiB — check you have not lowered it |
 | Mining produces nothing on mainnet | `pow_limit` is genuinely hard | use `--network devnet` to see the machinery work |
 

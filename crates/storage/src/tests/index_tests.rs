@@ -280,3 +280,73 @@ fn index_snapshot(s: &Store) -> Vec<(Vec<u8>, Vec<u8>)> {
     out.sort();
     out
 }
+
+#[test]
+fn the_exact_cursor_form_walks_every_row_in_chunks() {
+    let s = indexed();
+    let mut b = ChainBuilder::new();
+    for blk in b.build(24) {
+        s.connect_block(&blk.hash, blk.height, &blk.entry, &blk.diff, &blk.block).unwrap();
+    }
+    let key = pkh(0);
+    let all = s.address_history_after(&key, None, 1000).unwrap();
+    assert!(all.len() >= 2, "this address should have several entries");
+
+    // One row per chunk. An exact (height, tx_idx) cursor always advances, so
+    // this reproduces `all` exactly rather than re-reading or skipping a
+    // height, which is the whole reason this form exists.
+    let mut walked = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = s.address_history_after(&key, cursor, 1).unwrap();
+        let Some(&(height, idx, id)) = page.first() else { break };
+        walked.push((height, idx, id));
+        cursor = Some((height, idx + 1));
+    }
+    assert_eq!(walked, all);
+}
+
+#[test]
+fn a_cursor_resumes_inside_one_height_without_losing_a_row() {
+    let s = indexed();
+    let mut b = ChainBuilder::new();
+    for blk in b.build(16) {
+        s.connect_block(&blk.hash, blk.height, &blk.entry, &blk.diff, &blk.block).unwrap();
+    }
+    let key = pkh(0);
+    let all = s.address_history_after(&key, None, 1000).unwrap();
+    let (height, idx, _) = all[0];
+
+    // Resuming AT a row returns it; resuming one past it does not. That is the
+    // property the height cursor cannot express, and losing it is how a
+    // balance silently drops the rows it needs.
+    let at = s.address_history_after(&key, Some((height, idx)), 1000).unwrap();
+    assert_eq!(at, all);
+    let past = s.address_history_after(&key, Some((height, idx + 1)), 1000).unwrap();
+    assert_eq!(past.len(), all.len() - 1);
+    assert!(!past.iter().any(|&(h, i, _)| h == height && i == idx));
+}
+
+#[test]
+fn the_contract_paging_view_agrees_with_the_exact_walk() {
+    let s = indexed();
+    let mut b = ChainBuilder::new();
+    for blk in b.build(20) {
+        s.connect_block(&blk.hash, blk.height, &blk.entry, &blk.diff, &blk.block).unwrap();
+    }
+    let key = pkh(0);
+    let paged = s.address_history(&key, 0, 1000).unwrap();
+    let exact: Vec<_> =
+        s.address_history_after(&key, None, 1000).unwrap().into_iter().map(|(h, _, id)| (h, id)).collect();
+    assert_eq!(paged, exact);
+}
+
+#[test]
+fn the_exact_cursor_form_needs_the_index() {
+    let s = Store::open_in_memory(StoreConfig::default()).unwrap();
+    assert!(matches!(
+        s.address_history_after(&pkh(0), None, 10).unwrap_err(),
+        StorageError::IndexDisabled
+    ));
+    assert!(s.address_history_after(&pkh(0), None, 0).is_err(), "limit 0 still checks the index");
+}

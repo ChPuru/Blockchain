@@ -221,8 +221,14 @@ pub struct AddressResponse {
     pub utxo_count: u64,
     /// Transactions touching this address.
     pub tx_count: u64,
-    /// History, newest first.
+    /// History, newest first. Capped; `tx_count` is not.
     pub transactions: Vec<AddressTx>,
+    /// Whether the balances above cover this address's entire history.
+    ///
+    /// `false` means the scan limit cut the walk short and every figure here
+    /// is a lower bound. The page renders a warning rather than presenting a
+    /// partial balance as the balance.
+    pub complete: bool,
 }
 
 /// One row of an address's history.

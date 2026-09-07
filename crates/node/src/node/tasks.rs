@@ -106,6 +106,12 @@ pub async fn announce_blocks(
         let hash = ferrum_storage::header_hash(&block.header);
         match handle.publish_block(block).await {
             Ok(id) => tracing::debug!(%hash, msg_id = ?id, "announced a mined block"),
+            // A node with no mesh peers yet is the normal state of a solo
+            // devnet and of every node for its first few seconds; warning once
+            // per block there would bury the publish failures that matter.
+            Err(e) if e.is_no_peers() => {
+                tracing::debug!(%hash, error = %e, "no peers to announce a mined block to");
+            }
             Err(e) => tracing::warn!(%hash, error = %e, "could not announce a mined block"),
         }
     }

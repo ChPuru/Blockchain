@@ -28,7 +28,9 @@ use ferrum_types::{Amount, Coin, OutPoint, Txid};
 
 use crate::error::RpcError;
 use crate::handlers::convert;
-use crate::handlers::lookup::{self, ADDRESS_HISTORY_LIMIT};
+use crate::handlers::lookup::{
+    self, ADDRESS_HISTORY_LIMIT, ADDRESS_SCAN_CHUNK, ADDRESS_SCAN_LIMIT,
+};
 use crate::provider::{ChainProvider, MempoolProvider};
 use crate::types::rpc::{AddressBalance, UnspentJson};
 
@@ -61,8 +63,18 @@ pub struct AddressReport {
     pub pending: Amount,
     /// Unspent outputs paying this address, ascending by outpoint.
     pub utxos: Vec<(OutPoint, Coin)>,
-    /// History, newest first.
+    /// History, newest first, capped at [`ADDRESS_HISTORY_LIMIT`] rows.
     pub history: Vec<AddressHistoryEntry>,
+    /// How many transactions touched this address across the whole walk.
+    ///
+    /// Not `history.len()`: the rendered history is capped, this is not.
+    pub total_txs: u64,
+    /// Whether the walk saw the address's entire history.
+    ///
+    /// False when [`ADDRESS_SCAN_LIMIT`] cut it short, in which case every
+    /// balance here is a lower bound rather than a fact. A caller that prints
+    /// money must say so.
+    pub complete: bool,
 }
 
 impl AddressReport {
@@ -75,7 +87,7 @@ impl AddressReport {
     /// How many transactions touched this address.
     #[must_use]
     pub fn tx_count(&self) -> u64 {
-        u64::try_from(self.history.len()).unwrap_or(u64::MAX)
+        self.total_txs
     }
 }
 
@@ -99,12 +111,46 @@ pub fn address_report(
     // transaction that pays the same address twice appears once. Deduplicate
     // anyway: a transaction that both spends from and pays to the address is
     // filed under both its input and its output scripts.
+    //
+    // The walk is the *whole* history, in chunks, not one capped page. A
+    // balance assembled from a truncated history is a wrong number reported as
+    // a right one; the cap belongs on what gets rendered, further down.
     let mut seen: BTreeSet<Txid> = BTreeSet::new();
     let mut ordered: Vec<(u64, Txid)> = Vec::new();
-    for (height, txid) in chain.address_history(&key, 0, ADDRESS_HISTORY_LIMIT)? {
-        if seen.insert(txid) {
-            ordered.push((height, txid));
+    let mut cursor: Option<(u64, u32)> = None;
+    let mut complete = false;
+    while ordered.len() < ADDRESS_SCAN_LIMIT {
+        let rows = chain.address_history_after(&key, cursor, ADDRESS_SCAN_CHUNK)?;
+        let Some(&(last_height, last_idx, _)) = rows.last() else {
+            // A short chunk with nothing in it: the history ends here.
+            complete = true;
+            break;
+        };
+        let exhausted = rows.len() < ADDRESS_SCAN_CHUNK;
+        for (height, _idx, txid) in rows {
+            if seen.insert(txid) {
+                ordered.push((height, txid));
+            }
         }
+        if exhausted {
+            complete = true;
+            break;
+        }
+        // Resume one position past the last row consumed. An exact
+        // `(height, tx_idx)` cursor always advances, so this terminates even
+        // when a single block holds more entries than one chunk.
+        cursor = Some(match last_idx.checked_add(1) {
+            Some(next) => (last_height, next),
+            None => (last_height.saturating_add(1), 0),
+        });
+    }
+    if !complete {
+        tracing::warn!(
+            address = %address.encode(),
+            scanned = ordered.len(),
+            limit = ADDRESS_SCAN_LIMIT,
+            "address history hit the scan limit; the balance is a lower bound"
+        );
     }
 
     let mut utxos: BTreeMap<OutPoint, Coin> = BTreeMap::new();
@@ -181,6 +227,12 @@ pub fn address_report(
         );
     }
 
+    // Count before the render cap, not after: `tx_count` answers "how many
+    // transactions touched this address", which is not "how many rows fit on
+    // the page".
+    let total_txs = u64::try_from(history.len()).unwrap_or(u64::MAX);
+    history.truncate(ADDRESS_HISTORY_LIMIT);
+
     let mut confirmed = Amount::ZERO;
     let mut immature = Amount::ZERO;
     for coin in utxos.values() {
@@ -201,6 +253,8 @@ pub fn address_report(
         pending,
         utxos: utxos.into_iter().collect(),
         history,
+        total_txs,
+        complete,
     })
 }
 

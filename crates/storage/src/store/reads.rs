@@ -200,14 +200,44 @@ impl Store {
         from_height: u64,
         limit: usize,
     ) -> Result<Vec<(u64, Txid)>, StorageError> {
+        let rows = self.address_history_after(key, Some((from_height, 0)), limit)?;
+        Ok(rows.into_iter().map(|(height, _idx, id)| (height, id)).collect())
+    }
+
+    /// The exact-cursor form of [`Store::address_history`].
+    ///
+    /// `after` is the `(height, tx_idx)` position to start **at**, inclusive,
+    /// or `None` to start at the beginning of this address's history. Rows come
+    /// back as `(height, tx_idx, txid)` in ascending index order, so a caller
+    /// resumes with `Some((height, tx_idx + 1))` of the last row it consumed.
+    ///
+    /// # Why this exists alongside the contract's height-cursor form
+    ///
+    /// CONTRACT §7 fixes `address_history` on a *height* cursor, which cannot
+    /// resume inside a block: a caller whose page boundary lands mid-height
+    /// must either re-read that height or skip its remainder. That is fine for
+    /// an explorer's "older" link, and wrong for anything that must see an
+    /// address's history *in full* — a balance, for instance, where silently
+    /// dropping rows understates the money. This form is the complete walk;
+    /// [`Store::address_history`] is the contract's paging view built on it.
+    ///
+    /// # Errors
+    /// [`StorageError::IndexDisabled`] when the store has no index.
+    pub fn address_history_after(
+        &self,
+        key: &[u8],
+        after: Option<(u64, u32)>,
+        limit: usize,
+    ) -> Result<Vec<(u64, u32, Txid)>, StorageError> {
         self.require_index()?;
         let mut out = Vec::new();
         if limit == 0 {
             return Ok(out);
         }
+        let (from_height, from_idx) = after.unwrap_or((0, 0));
         let txn = self.db.begin_read()?;
         let t = txn.open_table(ADDR_INDEX)?;
-        let start = addr_index_key(key, from_height, 0);
+        let start = addr_index_key(key, from_height, from_idx);
         let end = addr_index_key(key, u64::MAX, u32::MAX);
         for entry in t.range::<&[u8]>(start.as_slice()..=end.as_slice())? {
             let (k, v) = entry?;
@@ -218,11 +248,11 @@ impl Store {
             if raw.len() != key.len() + tables::ADDR_INDEX_SUFFIX_LEN {
                 continue;
             }
-            let (addr, height, _idx) = addr_index_parts(raw)?;
+            let (addr, height, idx) = addr_index_parts(raw)?;
             if addr != key {
                 continue;
             }
-            out.push((height, Txid(Hash32::from_bytes(*v.value()))));
+            out.push((height, idx, Txid(Hash32::from_bytes(*v.value()))));
             if out.len() >= limit {
                 break;
             }

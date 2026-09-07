@@ -26,13 +26,31 @@ pub const RECENT_BLOCKS: usize = 10;
 /// How many transactions the explorer's home page lists.
 pub const RECENT_TXS: usize = 10;
 
-/// How much of an address's history one page returns.
+/// How many history rows an address page *renders*.
 ///
-/// `Store::address_history` pages by *height*, not by row, so a limit must be
-/// large enough to swallow every entry at the last height it reaches or it
-/// silently truncates mid-block. A thousand rows is far past any address on a
-/// two-minute chain and still bounded.
+/// This caps the list the explorer draws, never the walk that produces the
+/// balance. Those two limits used to be one, which meant an address with more
+/// than this many transactions — any devnet miner within a minute — reported a
+/// balance computed from its oldest thousand rows and an `immature` of zero,
+/// because the maturity window is by definition the newest rows and was
+/// exactly what got dropped. Truncating a rendered list is a UI decision;
+/// truncating a balance is a wrong number.
 pub const ADDRESS_HISTORY_LIMIT: usize = 1_000;
+
+/// How many rows one chunk of the full-history walk asks for.
+///
+/// Large enough that a whole block's worth of entries for one address is
+/// normally a single round trip, small enough that a huge address does not
+/// materialise its entire history in one allocation.
+pub const ADDRESS_SCAN_CHUNK: usize = 1_000;
+
+/// Hard ceiling on the full-history walk behind a balance.
+///
+/// An address query must be bounded or it is a denial-of-service vector, so
+/// the walk stops here. Unlike the old silent truncation the caller is *told*:
+/// [`crate::handlers::address::AddressReport::complete`] goes false, and the
+/// balance is reported as partial rather than as fact.
+pub const ADDRESS_SCAN_LIMIT: usize = 250_000;
 
 /// How far forward [`find_spender`] will look for the transaction that spent
 /// an output.

@@ -239,6 +239,23 @@ pub trait ChainProvider: Send + Sync + std::fmt::Debug + 'static {
         limit: usize,
     ) -> Result<Vec<(u64, Txid)>, RpcError>;
 
+    /// Ascending `(height, tx_idx, txid)` rows for an address key, starting at
+    /// the exact `(height, tx_idx)` cursor `after`. Needs the index.
+    ///
+    /// The height cursor of [`ChainProvider::address_history`] cannot resume
+    /// inside a block, so a caller that must see an address's history *in
+    /// full* — the balance, above all — walks it through this instead.
+    ///
+    /// # Errors
+    /// [`RpcErrorCode::IndexDisabled`] without the index, storage failures
+    /// otherwise.
+    fn address_history_after(
+        &self,
+        key: &[u8],
+        after: Option<(u64, u32)>,
+        limit: usize,
+    ) -> Result<Vec<(u64, u32, Txid)>, RpcError>;
+
     /// Every unspent coin locked by one of `scripts`.
     ///
     /// Scans the UTXO set, so it needs no index — which is what lets the faucet

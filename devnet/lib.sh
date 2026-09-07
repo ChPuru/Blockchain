@@ -9,6 +9,14 @@
 
 set -uo pipefail
 
+# Git Bash / MSYS2 rewrites any argument that looks like a Unix path into a
+# Windows one, so `--p2p-listen /ip4/127.0.0.1/tcp/8655` arrives at the binary as
+# `C:/Program Files/Git/ip4/127.0.0.1/tcp/8655` and every multiaddr flag fails.
+# Excluding all arguments from that conversion is the documented fix and is a
+# no-op on Linux and macOS.
+export MSYS2_ARG_CONV_EXCL="*"
+export MSYS_NO_PATHCONV=1
+
 DEVNET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$DEVNET_DIR/.." && pwd)"
 DATA_ROOT="${FERRUM_DEVNET_DATA:-$DEVNET_DIR/data}"

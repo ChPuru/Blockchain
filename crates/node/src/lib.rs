@@ -68,6 +68,7 @@
 
 pub mod config;
 pub mod error;
+pub mod faucet;
 pub mod miner;
 pub mod node;
 pub mod relay;
@@ -79,6 +80,7 @@ pub use crate::config::{
     resolve, resolve_from_process,
 };
 pub use crate::error::{ConfigError, NodeError, ValueSource};
+pub use crate::faucet::NodeKeyFaucetSource;
 pub use crate::miner::{Miner, Payout, resolve_payout};
 pub use crate::node::{Node, NodeKey, wait_for_shutdown_signal};
 pub use crate::relay::{Clock, GossipVerdict, Relay, SystemClock};

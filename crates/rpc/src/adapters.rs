@@ -122,6 +122,18 @@ impl ChainProvider for ChainHandle {
         Ok(self.store.address_history(key, from_height, limit)?)
     }
 
+    fn address_history_after(
+        &self,
+        key: &[u8],
+        after: Option<(u64, u32)>,
+        limit: usize,
+    ) -> Result<Vec<(u64, u32, Txid)>, RpcError> {
+        if !self.index_enabled {
+            return Err(RpcError::index_disabled("address history"));
+        }
+        Ok(self.store.address_history_after(key, after, limit)?)
+    }
+
     fn utxos_for_scripts(&self, scripts: &[Script]) -> Result<Vec<(OutPoint, Coin)>, RpcError> {
         // A `BTreeSet` rather than a `Vec` scan: the faucet wallet hands over
         // its whole address book, and consensus-adjacent code never iterates a

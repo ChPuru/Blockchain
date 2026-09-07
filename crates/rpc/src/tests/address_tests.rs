@@ -8,6 +8,7 @@ use ferrum_types::{Amount, COIN, Transaction, TxOut};
 
 use crate::error::RpcErrorCode;
 use crate::handlers::address::{address_report, get_balance, is_immature, list_unspent};
+use crate::handlers::lookup::ADDRESS_HISTORY_LIMIT;
 use crate::tests::fixture::{FIXTURE_MATURITY, Fixture, StubMempool, address};
 
 #[test]
@@ -178,4 +179,66 @@ fn the_genesis_burn_output_belongs_to_no_address() {
         None
     );
     let _ = txid(&genesis.txs[0]);
+}
+
+#[test]
+fn a_balance_is_not_truncated_by_the_history_page_size() {
+    // The regression this guards. `address_report` used to assemble the
+    // balance from one capped page of history, taken oldest-first. Any address
+    // with more than ADDRESS_HISTORY_LIMIT transactions — a devnet miner
+    // inside a minute — then reported a balance computed from its oldest
+    // thousand rows, and an `immature` of exactly zero, because the maturity
+    // window is by definition the newest rows and was precisely what the cap
+    // threw away. Observed live at height 1338: confirmed 1000 coins,
+    // immature 0, when 1338 coinbases existed and ~100 were immature.
+    let extra = 5usize;
+    let blocks = ADDRESS_HISTORY_LIMIT + extra;
+    let f = Fixture::build(blocks, false);
+    let chain = f.provider();
+    let pool = StubMempool::new();
+
+    let balance = get_balance(&*chain, &pool, &f.miner.encode()).unwrap();
+    assert_eq!(
+        balance.utxo_count,
+        u64::try_from(blocks).unwrap(),
+        "every coinbase must be counted, not just the first page"
+    );
+
+    // The tip is at `blocks`; with a two-block window the coinbases of the tip
+    // and its parent are immature and the rest are spendable.
+    let immature_count = u64::from(u32::try_from(FIXTURE_MATURITY).unwrap());
+    assert_eq!(
+        balance.immature.to_grains(),
+        immature_count * 50 * COIN,
+        "the newest coinbases are immature; a cap that drops them reports zero"
+    );
+    assert_ne!(balance.immature.to_grains(), 0);
+    assert_eq!(
+        balance.confirmed.to_grains(),
+        (u64::try_from(blocks).unwrap() - immature_count) * 50 * COIN
+    );
+
+    // listunspent is backed by the same report, so it must agree.
+    let unspent = list_unspent(&*chain, &pool, &f.miner.encode()).unwrap();
+    assert_eq!(unspent.len(), blocks);
+}
+
+#[test]
+fn the_rendered_history_stays_capped_while_the_count_does_not() {
+    // The cap is a rendering decision and survives; what must not survive is
+    // the cap leaking into the numbers.
+    let blocks = ADDRESS_HISTORY_LIMIT + 5;
+    let f = Fixture::build(blocks, false);
+    let chain = f.provider();
+    let report = address_report(&*chain, &StubMempool::new(), &f.miner.encode()).unwrap();
+
+    assert_eq!(report.history.len(), ADDRESS_HISTORY_LIMIT, "the page is still bounded");
+    assert_eq!(report.tx_count(), u64::try_from(blocks).unwrap(), "the count is not");
+    assert!(report.complete, "the whole history fits under the scan limit");
+
+    // Newest first, so the capped page keeps the recent end — the half a user
+    // came to see — not the oldest thousand rows.
+    let heights: Vec<u64> = report.history.iter().filter_map(|e| e.height).collect();
+    assert_eq!(heights.first().copied(), Some(u64::try_from(blocks).unwrap()));
+    assert!(heights.windows(2).all(|w| w[0] > w[1]), "descending by height");
 }

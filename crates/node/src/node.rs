@@ -52,6 +52,8 @@ use ferrum_rpc::{
     ChainHandle, ExplorerServerHandle, NodeContext, RpcServerHandle, spawn_explorer_server,
     spawn_rpc_server,
 };
+
+use crate::faucet::NodeKeyFaucetSource;
 use ferrum_storage::Store;
 use ferrum_types::Block;
 use tokio::sync::{broadcast, mpsc};
@@ -96,6 +98,7 @@ pub struct Node {
     explorer: Option<ExplorerServerHandle>,
     local_peer_id: PeerId,
     mining_address: Option<String>,
+    faucet_address: Option<String>,
 }
 
 impl Node {
@@ -220,6 +223,37 @@ impl Node {
                 listen_addrs.iter().map(Multiaddr::to_string).collect(),
             )));
         }
+        // The faucet draws on the node's own key — see `crate::faucet` for why
+        // that is the funding source. Without this the `--faucet` flag, the
+        // `explorer.faucet` config field and the devnet default all resolve to
+        // `true` and then reach nothing, and `POST /api/faucet` answers
+        // "faucet disabled" on every network.
+        let faucet_address = if config.faucet {
+            let source = Arc::new(NodeKeyFaucetSource::new(
+                key.mining_secret()?,
+                key.mining_address(config.network)?,
+                Arc::clone(ctx.chain()),
+                config.params.chain_id,
+                ferrum_wallet::dust_threshold(config.params.min_relay_fee_per_kb),
+                config.params.coinbase_maturity,
+                ferrum_rpc::DEFAULT_FAUCET_FEE_RATE,
+            ));
+            let address = source.address().encode();
+            let mut faucet_config = ferrum_rpc::FaucetConfig::default();
+            if let Some(amount) = config.faucet_amount {
+                faucet_config = faucet_config.with_amount(amount);
+            }
+            ctx = ctx.with_faucet(Arc::new(ferrum_rpc::Faucet::new(faucet_config, source)));
+            tracing::info!(
+                address = %address,
+                amount = %faucet_config.amount.to_frm_string(),
+                "faucet enabled"
+            );
+            Some(address)
+        } else {
+            None
+        };
+
         let rpc = Some(spawn_rpc_server(config.rpc_server_config(), ctx.clone()).await?);
         let explorer = Some(spawn_explorer_server(config.explorer_server_config(), ctx).await?);
 
@@ -256,6 +290,7 @@ impl Node {
             explorer,
             local_peer_id,
             mining_address,
+            faucet_address,
         })
     }
 
@@ -317,6 +352,15 @@ impl Node {
     #[must_use]
     pub fn mining_address(&self) -> Option<&str> {
         self.mining_address.as_deref()
+    }
+
+    /// The address the faucet pays from, or `None` when no faucet is served.
+    ///
+    /// An operator funding a faucet on a node that mines elsewhere needs this
+    /// address, so it is reachable rather than only logged.
+    #[must_use]
+    pub fn faucet_address(&self) -> Option<&str> {
+        self.faucet_address.as_deref()
     }
 
     /// The address the JSON-RPC listener actually bound.

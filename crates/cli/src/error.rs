@@ -98,10 +98,6 @@ pub enum CliError {
     #[error(transparent)]
     Consensus(#[from] ferrum_consensus::ConsensusError),
 
-    /// The peer-to-peer service refused an operation.
-    #[error(transparent)]
-    P2p(#[from] ferrum_p2p::P2pError),
-
     /// The RPC or explorer listener could not be started.
     #[error(transparent)]
     Server(#[from] ferrum_rpc::RpcError),

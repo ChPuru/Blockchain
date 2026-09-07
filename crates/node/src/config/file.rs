@@ -72,8 +72,9 @@ pub struct ExplorerSection {
     pub faucet: Option<bool>,
     /// Faucet payout, in FRM, as a decimal **string**.
     ///
-    /// A string and not a float: a TOML float is a `f64`, and no monetary
-    /// value in this workspace is ever carried by one.
+    /// A string and not a TOML float: a TOML float is a 64-bit binary float,
+    /// and no monetary value in this workspace is ever carried by one.
+    /// Parsed with `Amount::from_frm_str`, which is an integer-only parse.
     pub faucet_amount: Option<String>,
 }
 
