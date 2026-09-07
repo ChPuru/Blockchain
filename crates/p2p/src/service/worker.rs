@@ -457,7 +457,7 @@ impl Worker {
 
             P2pCommand::Dial { addr, reply } => {
                 let result = swarm
-                    .dial(addr.clone())
+                    .dial(dial_opts(addr.clone()))
                     .map_err(|e| P2pError::Dial { addr: addr.to_string(), reason: e.to_string() });
                 drop(reply.send(result));
             }
@@ -485,7 +485,7 @@ impl Worker {
                 continue;
             }
 
-            let opts = DialOpts::from(peer.addr.clone());
+            let opts = dial_opts(peer.addr.clone());
             let connection_id = opts.connection_id();
             match swarm.dial(opts) {
                 Ok(()) => {
@@ -506,6 +506,32 @@ impl Worker {
             }
         }
     }
+}
+
+/// How this node dials: a **fresh source port**, never its listening one.
+///
+/// libp2p's default is `PortUse::Reuse` — dial *from* the port you listen on —
+/// because that is what makes hole punching and observed-address reporting work
+/// behind a NAT. Ferrum runs none of that: there is no AutoNAT, no DCUtR and no
+/// relay in [`crate::behaviour::FerrumBehaviour`], so port reuse buys this node
+/// nothing and costs it two concrete failures:
+///
+/// 1. **Simultaneous open.** Two peers that list each other statically dial each
+///    other at the same moment. With port reuse both sockets carry the same
+///    address pair, so TCP resolves them into *one* connection on which both
+///    ends believe they are the initiator — and the Noise handshake fails with
+///    `Handshake failed: input error`. A full mesh built from a static peer list
+///    hits this on every pair that starts together, which is all of them.
+/// 2. **Windows refuses it outright.** Binding a second socket to the listening
+///    port fails with `WSAEADDRINUSE` (os error 10048), so a devnet on loopback
+///    forms a partial mesh and the missing edges back off exponentially until
+///    they are minutes apart.
+///
+/// A fresh source port makes the two directions two distinct connections, which
+/// is what every other peer-to-peer node does and what Bitcoin Core has always
+/// done.
+pub(super) fn dial_opts(addr: Multiaddr) -> DialOpts {
+    DialOpts::unknown_peer_id().address(addr).allocate_new_port().build()
 }
 
 /// A stable name for a validation verdict, for log lines.

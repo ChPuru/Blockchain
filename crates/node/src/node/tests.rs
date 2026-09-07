@@ -276,6 +276,53 @@ async fn a_mined_block_survives_a_restart() {
     node.shutdown().await.unwrap();
 }
 
+/// A start that fails after the first task is running must not leave the data
+/// directory locked.
+///
+/// The failure path is the one that matters here: `spawn_chain_event_bridge`
+/// runs before the listeners bind, and it holds an `Arc<Store>` — which is the
+/// `redb` file lock. Without [`StartGuard`] that blocking thread never stops,
+/// so a node that failed once because a port was busy can never start on that
+/// datadir again, and the operator sees "database already open" forever after
+/// a transient error they have since fixed.
+#[tokio::test]
+async fn a_failed_start_releases_the_datadir() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    // Unbindable: the address belongs to no interface on this machine, which
+    // is the same shape as "that port is already in use" and far more
+    // deterministic than arranging a real conflict.
+    config.p2p_listen = "/ip4/203.0.113.1/tcp/1".parse().unwrap();
+
+    match Node::start(config).await {
+        Err(_) => {}
+        // Some platforms accept that bind. Then there is nothing to test here,
+        // and the node has to be stopped rather than leaked.
+        Ok(node) => {
+            node.shutdown().await.unwrap();
+            return;
+        }
+    }
+
+    // The guard cancels; the tasks notice on their next poll. Retry rather
+    // than sleep for a fixed time: the poll interval is an implementation
+    // detail and a fixed sleep would pin it.
+    let store_config = ferrum_storage::StoreConfig::default();
+    let path = dir.path().join(crate::config::STORE_FILE);
+    for attempt in 0..POLL_ATTEMPTS {
+        match ferrum_storage::Store::open(&path, store_config.clone()) {
+            Ok(store) => {
+                drop(store);
+                return;
+            }
+            Err(e) if attempt + 1 == POLL_ATTEMPTS => {
+                panic!("the datadir was still locked after a failed start: {e}")
+            }
+            Err(_) => tokio::time::sleep(POLL_INTERVAL).await,
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_datadir_belonging_to_another_chain_is_refused() {
     // The genesis check working is the point: a node whose parameters differ

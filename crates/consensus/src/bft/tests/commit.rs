@@ -1,48 +1,22 @@
-//! Tests for the BFT engine, its commit certificates and its signing
-//! digests.
-//!
-//! Split out of `mod.rs` so that the production module stays readable; the
-//! `#![allow]`s below are the usual test-only relaxations.
+//! The vote preimage, the three signing digests, the validator set and
+//! `2f+1` commit-certificate verification.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::arithmetic_side_effects)]
+use core::time::Duration;
 
-use super::tests_support::{validator_ids, validator_key};
+use ferrum_crypto::{Signature, TAG_BFT_PRECOMMIT, tagged_hash};
+use ferrum_types::{BlockSeal, ChainId, ChainParams, ValidatorId};
+
 use super::*;
-use crate::engine::block_hash;
-use crate::testview::TestView;
-
-fn params(n: usize) -> ChainParams {
-    let mut p = ChainParams::devnet();
-    p.bft_activation_height = Some(0);
-    p.bft_validators = validator_ids(n);
-    p
-}
-
-fn engine(n: usize) -> BftEngine {
-    BftEngine::new(params(n), None).unwrap()
-}
+use crate::bft::vote::VoteKind;
+use crate::error::ConsensusError;
 
 fn vote(n: usize) -> VoteMsg {
-    VoteMsg::new(params(n).chain_id, 7, 2, BlockHash::from_bytes([9; 32]))
+    VoteMsg::new(params(n).chain_id, 7, 2, hash(9))
 }
 
-/// A commit signed by validators `indices`, over `(height, round, hash)`.
-fn commit_signed_by(
-    p: &ChainParams,
-    indices: &[u16],
-    height: u64,
-    round: u32,
-    hash: BlockHash,
-) -> BftCommit {
-    let v = VoteMsg::new(p.chain_id, height, round, hash);
-    let digest = precommit_digest(&v);
-    let signatures = indices
-        .iter()
-        .map(|i| (*i, validator_key(usize::from(*i)).sign_deterministic(&digest)))
-        .collect();
-    BftCommit::new(height, round, hash, signatures)
-}
+// ---------------------------------------------------------------------------
+// The frozen preimage
+// ---------------------------------------------------------------------------
 
 #[test]
 fn vote_encoding_is_forty_eight_frozen_bytes() {
@@ -76,15 +50,17 @@ fn the_three_vote_digests_are_domain_separated() {
 
 #[test]
 fn the_chain_id_is_inside_every_digest() {
-    let a = VoteMsg::new(ChainId(1), 5, 0, BlockHash::from_bytes([1; 32]));
-    let b = VoteMsg::new(ChainId(2), 5, 0, BlockHash::from_bytes([1; 32]));
+    let a = VoteMsg::new(ChainId(1), 5, 0, hash(1));
+    let b = VoteMsg::new(ChainId(2), 5, 0, hash(1));
     assert_ne!(precommit_digest(&a), precommit_digest(&b), "cross-chain replay must be impossible");
+    assert_ne!(prevote_digest(&a), prevote_digest(&b));
+    assert_ne!(proposal_digest(&a), proposal_digest(&b));
 }
 
 #[test]
 fn the_round_is_inside_every_digest() {
-    let a = VoteMsg::new(ChainId(3), 5, 0, BlockHash::from_bytes([1; 32]));
-    let b = VoteMsg::new(ChainId(3), 5, 1, BlockHash::from_bytes([1; 32]));
+    let a = VoteMsg::new(ChainId(3), 5, 0, hash(1));
+    let b = VoteMsg::new(ChainId(3), 5, 1, hash(1));
     assert_ne!(
         precommit_digest(&a),
         precommit_digest(&b),
@@ -93,24 +69,53 @@ fn the_round_is_inside_every_digest() {
 }
 
 #[test]
-fn a_commit_round_trips_through_its_seal() {
-    let p = params(4);
-    let c = commit_signed_by(&p, &[0, 1, 2], 7, 1, BlockHash::from_bytes([4; 32]));
-    let seal = c.to_seal();
-    assert_eq!(seal.engine, BlockSeal::ENGINE_BFT);
-    assert_eq!(BftCommit::decode(&seal.data).unwrap(), c);
-    assert_eq!(c.vote(p.chain_id), VoteMsg::new(p.chain_id, 7, 1, c.block_hash));
+fn the_block_hash_is_inside_every_digest() {
+    let a = VoteMsg::new(ChainId(3), 5, 0, hash(1));
+    let b = VoteMsg::new(ChainId(3), 5, 0, hash(2));
+    assert_ne!(precommit_digest(&a), precommit_digest(&b));
+    assert_ne!(prevote_digest(&a), prevote_digest(&b));
 }
 
 #[test]
-fn a_commit_with_trailing_bytes_is_rejected() {
-    let p = params(4);
-    let c = commit_signed_by(&p, &[0, 1, 2], 7, 1, BlockHash::from_bytes([4; 32]));
-    let mut bytes = c.encode();
-    bytes.push(0);
-    assert!(matches!(BftCommit::decode(&bytes), Err(ConsensusError::MalformedSeal(_))));
-    assert!(matches!(BftCommit::decode(&[]), Err(ConsensusError::MalformedSeal(_))));
+fn a_nil_vote_is_the_zero_block_hash() {
+    let v = VoteMsg::nil(ChainId(3), 5, 1);
+    assert!(v.is_nil());
+    assert_eq!(v.block_hash, NIL_BLOCK);
+    assert!(NIL_BLOCK.is_zero());
+    assert!(!VoteMsg::new(ChainId(3), 5, 1, hash(1)).is_nil());
 }
+
+#[test]
+fn a_signed_vote_verifies_only_under_its_own_kind() {
+    let set = set(4);
+    let v = VoteMsg::new(params(4).chain_id, 3, 0, hash(7));
+    let signed = SignedVote::sign(&validator_key(1), 1, VoteKind::Prevote, v);
+    assert_eq!(signed.verify(VoteKind::Prevote, &set), Ok(()));
+    // The tag is what stops a prevote being counted as a precommit — and a
+    // precommit is the only thing a commit certificate may be built from.
+    assert!(signed.verify(VoteKind::Precommit, &set).is_err());
+    assert!(!signed.is_nil());
+}
+
+#[test]
+fn a_proposal_signature_is_checked() {
+    let set = set(4);
+    let p = proposal(0, 4, 1, hash(3), Some(0));
+    assert_eq!(p.verify(params(4).chain_id, &set), Ok(()));
+    assert_eq!(p.vote(params(4).chain_id), VoteMsg::new(params(4).chain_id, 4, 1, hash(3)));
+
+    let mut forged = p;
+    forged.block_hash = hash(4);
+    assert!(forged.verify(params(4).chain_id, &set).is_err());
+
+    let mut wrong_signer = p;
+    wrong_signer.proposer = 1;
+    assert!(wrong_signer.verify(params(4).chain_id, &set).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// The validator set
+// ---------------------------------------------------------------------------
 
 #[test]
 fn quorum_arithmetic_matches_the_contract() {
@@ -151,6 +156,10 @@ fn quorum_intersection_holds_for_every_set_size_except_six() {
 #[test]
 fn a_set_below_four_is_refused() {
     for n in 0..MIN_VALIDATORS {
+        assert_eq!(
+            ValidatorSet::new(validator_ids(n)).err(),
+            Some(ConsensusError::ValidatorSetTooSmall { actual: n, minimum: 4 })
+        );
         let mut p = ChainParams::devnet();
         p.bft_validators = validator_ids(n);
         assert_eq!(
@@ -162,27 +171,39 @@ fn a_set_below_four_is_refused() {
 
 #[test]
 fn a_duplicated_validator_is_refused() {
-    let mut p = ChainParams::devnet();
-    let mut set = validator_ids(4);
-    set[3] = set[0];
-    p.bft_validators = set.clone();
+    let mut ids = validator_ids(4);
+    ids[3] = ids[0];
     assert_eq!(
-        BftEngine::new(p, None).err(),
-        Some(ConsensusError::DuplicateValidator(set[0].to_hex()))
+        ValidatorSet::new(ids.clone()).err(),
+        Some(ConsensusError::DuplicateValidator(ids[0].to_hex()))
     );
 }
 
 #[test]
 fn an_off_curve_validator_key_is_refused() {
-    let mut p = ChainParams::devnet();
-    let mut set = validator_ids(4);
+    let mut ids = validator_ids(4);
     // The field modulus itself is not a valid x coordinate.
-    set[2] = ValidatorId::from_bytes([0xff; 32]);
-    p.bft_validators = set;
-    match BftEngine::new(p, None) {
+    ids[2] = ValidatorId::from_bytes([0xff; 32]);
+    match ValidatorSet::new(ids) {
         Err(ConsensusError::InvalidValidatorKey { index, .. }) => assert_eq!(index, 2),
         other => panic!("expected InvalidValidatorKey, got {other:?}"),
     }
+}
+
+#[test]
+fn a_validator_set_maps_ids_to_indices_and_back() {
+    let s = set(4);
+    assert_eq!(s.len(), 4);
+    assert!(!s.is_empty());
+    for (i, id) in s.ids().iter().enumerate() {
+        assert_eq!(s.index_of(id), u16::try_from(i).ok());
+        assert!(s.key(u16::try_from(i).unwrap()).is_ok());
+    }
+    assert_eq!(s.index_of(&ValidatorId::from_bytes([1; 32])), None);
+    assert_eq!(
+        s.key(4).err(),
+        Some(ConsensusError::ValidatorIndexOutOfRange { index: 4, size: 4 })
+    );
 }
 
 #[test]
@@ -198,7 +219,7 @@ fn the_proposer_schedule_is_round_robin_over_height_and_round() {
     assert_eq!(e.proposer(0, 4), v[0]);
     assert_eq!(
         e.proposer(u64::MAX, u32::MAX),
-        v[(u128::from(u64::MAX) + u128::from(u32::MAX)) as usize % 4]
+        v[((u128::from(u64::MAX) + u128::from(u32::MAX)) % 4) as usize]
     );
 }
 
@@ -225,6 +246,7 @@ fn timeouts_double_each_round() {
     // spin the round machine at full speed.
     assert_eq!(BftEngine::timeout_for_round(base, u32::MAX), Duration::from_millis(u64::MAX));
     assert_eq!(BftEngine::timeout_for_round(Duration::ZERO, 5), Duration::ZERO);
+    assert_eq!(timeout_for_round(base, 3), Duration::from_millis(8_000));
 }
 
 #[test]
@@ -232,36 +254,81 @@ fn default_timeouts_are_present() {
     assert_eq!(DEFAULT_PROPOSE_TIMEOUT, Duration::from_millis(3_000));
     assert_eq!(DEFAULT_PREVOTE_TIMEOUT, Duration::from_millis(1_000));
     assert_eq!(DEFAULT_PRECOMMIT_TIMEOUT, Duration::from_millis(1_000));
+
+    let cfg = TimeoutConfig::default();
+    assert_eq!(cfg.base(TimeoutKind::Propose), DEFAULT_PROPOSE_TIMEOUT);
+    assert_eq!(cfg.base(TimeoutKind::Prevote), DEFAULT_PREVOTE_TIMEOUT);
+    assert_eq!(cfg.base(TimeoutKind::Precommit), DEFAULT_PRECOMMIT_TIMEOUT);
+    assert_eq!(cfg.delay(TimeoutKind::Propose, 2), Duration::from_millis(12_000));
+}
+
+// ---------------------------------------------------------------------------
+// Commit certificates
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_commit_round_trips_through_its_seal() {
+    let p = params(4);
+    let c = commit_signed_by(&p, &[0, 1, 2], 7, 1, hash(4));
+    let seal = c.to_seal();
+    assert_eq!(seal.engine, BlockSeal::ENGINE_BFT);
+    assert_eq!(BftCommit::decode(&seal.data).unwrap(), c);
+    assert_eq!(c.vote(p.chain_id), VoteMsg::new(p.chain_id, 7, 1, c.block_hash));
+}
+
+#[test]
+fn a_commit_with_trailing_bytes_is_rejected() {
+    let p = params(4);
+    let c = commit_signed_by(&p, &[0, 1, 2], 7, 1, hash(4));
+    let mut bytes = c.encode();
+    bytes.push(0);
+    assert!(matches!(BftCommit::decode(&bytes), Err(ConsensusError::MalformedSeal(_))));
+    assert!(matches!(BftCommit::decode(&[]), Err(ConsensusError::MalformedSeal(_))));
 }
 
 #[test]
 fn a_quorum_of_valid_signatures_verifies() {
     let p = params(4);
     let e = BftEngine::new(p.clone(), None).unwrap();
-    let hash = BlockHash::from_bytes([0x11; 32]);
-    let c = commit_signed_by(&p, &[0, 1, 2], 12, 0, hash);
-    assert_eq!(e.verify_commit(&c, &hash, 12), Ok(()));
+    let h = hash(0x11);
+    let c = commit_signed_by(&p, &[0, 1, 2], 12, 0, h);
+    assert_eq!(e.verify_commit(&c, &h, 12), Ok(()));
 }
 
 #[test]
 fn all_four_signatures_also_verify() {
     let p = params(4);
     let e = BftEngine::new(p.clone(), None).unwrap();
-    let hash = BlockHash::from_bytes([0x11; 32]);
-    let c = commit_signed_by(&p, &[0, 1, 2, 3], 12, 0, hash);
-    assert_eq!(e.verify_commit(&c, &hash, 12), Ok(()));
+    let h = hash(0x11);
+    let c = commit_signed_by(&p, &[0, 1, 2, 3], 12, 0, h);
+    assert_eq!(e.verify_commit(&c, &h, 12), Ok(()));
 }
 
 #[test]
 fn one_signature_short_of_quorum_is_refused() {
+    // 2f signatures with f = 1: exactly the certificate an attacker can build
+    // from one honest validator and one Byzantine one.
     let p = params(4);
     let e = BftEngine::new(p.clone(), None).unwrap();
-    let hash = BlockHash::from_bytes([0x11; 32]);
-    let c = commit_signed_by(&p, &[0, 1], 12, 0, hash);
+    let h = hash(0x11);
+    let c = commit_signed_by(&p, &[0, 1], 12, 0, h);
     assert_eq!(
-        e.verify_commit(&c, &hash, 12),
+        e.verify_commit(&c, &h, 12),
         Err(ConsensusError::QuorumNotReached { have: 2, need: 3 })
     );
+}
+
+#[test]
+fn a_larger_set_also_rejects_two_f_signatures() {
+    // n = 7, f = 2, quorum 5: four signatures is 2f and must be refused.
+    let p = params(7);
+    let e = BftEngine::new(p.clone(), None).unwrap();
+    let h = hash(0x11);
+    assert_eq!(
+        e.verify_commit(&commit_signed_by(&p, &[0, 1, 2, 3], 3, 0, h), &h, 3),
+        Err(ConsensusError::QuorumNotReached { have: 4, need: 5 })
+    );
+    assert_eq!(e.verify_commit(&commit_signed_by(&p, &[0, 1, 2, 3, 4], 3, 0, h), &h, 3), Ok(()));
 }
 
 #[test]
@@ -269,41 +336,41 @@ fn killing_one_of_four_validators_still_reaches_quorum_but_two_halts() {
     // This is the operational promise in RUNNING.md, asserted.
     let p = params(4);
     let e = BftEngine::new(p.clone(), None).unwrap();
-    let hash = BlockHash::from_bytes([0x22; 32]);
-    assert_eq!(e.verify_commit(&commit_signed_by(&p, &[0, 1, 2], 1, 0, hash), &hash, 1), Ok(()));
-    assert!(e.verify_commit(&commit_signed_by(&p, &[0, 1], 1, 0, hash), &hash, 1).is_err());
+    let h = hash(0x22);
+    assert_eq!(e.verify_commit(&commit_signed_by(&p, &[0, 1, 2], 1, 0, h), &h, 1), Ok(()));
+    assert!(e.verify_commit(&commit_signed_by(&p, &[0, 1], 1, 0, h), &h, 1).is_err());
 }
 
 #[test]
 fn a_duplicated_validator_index_cannot_fill_a_quorum() {
     let p = params(4);
     let e = BftEngine::new(p.clone(), None).unwrap();
-    let hash = BlockHash::from_bytes([0x11; 32]);
-    let mut c = commit_signed_by(&p, &[0], 12, 0, hash);
+    let h = hash(0x11);
+    let mut c = commit_signed_by(&p, &[0], 12, 0, h);
     let sig = c.signatures[0].1;
     c.signatures = vec![(0, sig), (0, sig), (0, sig)];
-    assert_eq!(e.verify_commit(&c, &hash, 12), Err(ConsensusError::UnorderedCommitSignatures(1)));
+    assert_eq!(e.verify_commit(&c, &h, 12), Err(ConsensusError::UnorderedCommitSignatures(1)));
 }
 
 #[test]
 fn out_of_order_signatures_are_refused() {
     let p = params(4);
     let e = BftEngine::new(p.clone(), None).unwrap();
-    let hash = BlockHash::from_bytes([0x11; 32]);
-    let mut c = commit_signed_by(&p, &[0, 1, 2], 12, 0, hash);
+    let h = hash(0x11);
+    let mut c = commit_signed_by(&p, &[0, 1, 2], 12, 0, h);
     c.signatures.swap(0, 1);
-    assert_eq!(e.verify_commit(&c, &hash, 12), Err(ConsensusError::UnorderedCommitSignatures(1)));
+    assert_eq!(e.verify_commit(&c, &h, 12), Err(ConsensusError::UnorderedCommitSignatures(1)));
 }
 
 #[test]
 fn a_validator_index_outside_the_set_is_refused() {
     let p = params(4);
     let e = BftEngine::new(p.clone(), None).unwrap();
-    let hash = BlockHash::from_bytes([0x11; 32]);
-    let mut c = commit_signed_by(&p, &[0, 1, 2], 12, 0, hash);
+    let h = hash(0x11);
+    let mut c = commit_signed_by(&p, &[0, 1, 2], 12, 0, h);
     c.signatures[2].0 = 9;
     assert_eq!(
-        e.verify_commit(&c, &hash, 12),
+        e.verify_commit(&c, &h, 12),
         Err(ConsensusError::ValidatorIndexOutOfRange { index: 9, size: 4 })
     );
 }
@@ -312,10 +379,10 @@ fn a_validator_index_outside_the_set_is_refused() {
 fn a_forged_signature_is_refused() {
     let p = params(4);
     let e = BftEngine::new(p.clone(), None).unwrap();
-    let hash = BlockHash::from_bytes([0x11; 32]);
-    let mut c = commit_signed_by(&p, &[0, 1, 2], 12, 0, hash);
+    let h = hash(0x11);
+    let mut c = commit_signed_by(&p, &[0, 1, 2], 12, 0, h);
     c.signatures[1].1 = Signature::from_bytes([0x77; 64]);
-    match e.verify_commit(&c, &hash, 12) {
+    match e.verify_commit(&c, &h, 12) {
         Err(ConsensusError::BadCommitSignature { index, .. }) => assert_eq!(index, 1),
         other => panic!("expected BadCommitSignature, got {other:?}"),
     }
@@ -325,12 +392,12 @@ fn a_forged_signature_is_refused() {
 fn a_signature_by_the_wrong_validator_is_refused() {
     let p = params(4);
     let e = BftEngine::new(p.clone(), None).unwrap();
-    let hash = BlockHash::from_bytes([0x11; 32]);
-    let mut c = commit_signed_by(&p, &[0, 1, 2], 12, 0, hash);
+    let h = hash(0x11);
+    let mut c = commit_signed_by(&p, &[0, 1, 2], 12, 0, h);
     // Validator 3's signature filed under index 2.
     let digest = precommit_digest(&c.vote(p.chain_id));
     c.signatures[2].1 = validator_key(3).sign_deterministic(&digest);
-    match e.verify_commit(&c, &hash, 12) {
+    match e.verify_commit(&c, &h, 12) {
         Err(ConsensusError::BadCommitSignature { index, .. }) => assert_eq!(index, 2),
         other => panic!("expected BadCommitSignature, got {other:?}"),
     }
@@ -340,32 +407,48 @@ fn a_signature_by_the_wrong_validator_is_refused() {
 fn a_commit_for_another_block_or_height_is_refused() {
     let p = params(4);
     let e = BftEngine::new(p.clone(), None).unwrap();
-    let hash = BlockHash::from_bytes([0x11; 32]);
-    let other = BlockHash::from_bytes([0x12; 32]);
-    let c = commit_signed_by(&p, &[0, 1, 2], 12, 0, hash);
+    let h = hash(0x11);
+    let other = hash(0x12);
+    let c = commit_signed_by(&p, &[0, 1, 2], 12, 0, h);
 
     assert_eq!(
         e.verify_commit(&c, &other, 12),
         Err(ConsensusError::CommitMismatch {
-            actual: hash,
+            actual: h,
             actual_height: 12,
             expected: other,
             expected_height: 12,
         })
     );
-    assert!(matches!(e.verify_commit(&c, &hash, 13), Err(ConsensusError::CommitMismatch { .. })));
+    assert!(matches!(e.verify_commit(&c, &h, 13), Err(ConsensusError::CommitMismatch { .. })));
+}
+
+#[test]
+fn signatures_over_a_different_hash_are_refused() {
+    // The certificate claims our block, but every signature covers another
+    // one. This is the attack `CommitMismatch` alone would not catch.
+    let p = params(4);
+    let e = BftEngine::new(p.clone(), None).unwrap();
+    let ours = hash(0x11);
+    let theirs = hash(0x12);
+    let mut c = commit_signed_by(&p, &[0, 1, 2], 12, 0, theirs);
+    c.block_hash = ours;
+    match e.verify_commit(&c, &ours, 12) {
+        Err(ConsensusError::BadCommitSignature { index, .. }) => assert_eq!(index, 0),
+        other => panic!("expected BadCommitSignature, got {other:?}"),
+    }
 }
 
 #[test]
 fn a_commit_from_another_chain_is_refused() {
     let mut testnet = params(4);
     testnet.chain_id = ChainId::TESTNET;
-    let hash = BlockHash::from_bytes([0x11; 32]);
-    let c = commit_signed_by(&testnet, &[0, 1, 2], 12, 0, hash);
+    let h = hash(0x11);
+    let c = commit_signed_by(&testnet, &[0, 1, 2], 12, 0, h);
 
     // Same signatures, same block, replayed on devnet.
     let devnet = BftEngine::new(params(4), None).unwrap();
-    match devnet.verify_commit(&c, &hash, 12) {
+    match devnet.verify_commit(&c, &h, 12) {
         Err(ConsensusError::BadCommitSignature { index, .. }) => assert_eq!(index, 0),
         other => panic!("expected a cross-chain replay to fail, got {other:?}"),
     }
@@ -375,10 +458,10 @@ fn a_commit_from_another_chain_is_refused() {
 fn a_commit_from_another_round_is_refused() {
     let p = params(4);
     let e = BftEngine::new(p.clone(), None).unwrap();
-    let hash = BlockHash::from_bytes([0x11; 32]);
-    let mut c = commit_signed_by(&p, &[0, 1, 2], 12, 0, hash);
+    let h = hash(0x11);
+    let mut c = commit_signed_by(&p, &[0, 1, 2], 12, 0, h);
     c.round = 1; // signatures still cover round 0
-    match e.verify_commit(&c, &hash, 12) {
+    match e.verify_commit(&c, &h, 12) {
         Err(ConsensusError::BadCommitSignature { index, .. }) => assert_eq!(index, 0),
         other => panic!("expected a cross-round replay to fail, got {other:?}"),
     }
@@ -386,12 +469,11 @@ fn a_commit_from_another_round_is_refused() {
 
 #[test]
 fn an_empty_commit_is_refused_as_a_short_quorum() {
-    let p = params(4);
-    let e = BftEngine::new(p, None).unwrap();
-    let hash = BlockHash::from_bytes([0x11; 32]);
-    let c = BftCommit::new(12, 0, hash, Vec::new());
+    let e = engine(4);
+    let h = hash(0x11);
+    let c = BftCommit::new(12, 0, h, Vec::new());
     assert_eq!(
-        e.verify_commit(&c, &hash, 12),
+        e.verify_commit(&c, &h, 12),
         Err(ConsensusError::QuorumNotReached { have: 0, need: 3 })
     );
 }
@@ -418,73 +500,4 @@ fn a_node_signing_with_a_key_outside_the_set_has_no_index() {
     let e = BftEngine::new(params(4), Some(outsider)).unwrap();
     assert_eq!(e.own_index(), None);
     assert!(!e.is_proposer(0, 0));
-}
-
-#[test]
-fn engine_identity_matches_the_contract() {
-    let e = engine(4);
-    assert_eq!(e.name(), "bft");
-    assert_eq!(e.engine_id(), BlockSeal::ENGINE_BFT);
-    assert_eq!(e.params().chain_id, ChainParams::devnet().chain_id);
-    assert_eq!(e.validators().len(), 4);
-}
-
-#[test]
-fn every_block_contributes_exactly_one_unit_of_work() {
-    let e = engine(4);
-    assert_eq!(e.work(&BlockHeader::default()), Work::ONE);
-    assert_eq!(
-        e.work(&BlockHeader { bits: CompactTarget(0x1d00_ffff), ..BlockHeader::default() }),
-        Work::ONE
-    );
-}
-
-#[test]
-fn the_round_machine_reports_itself_unavailable_rather_than_accepting() {
-    let e = engine(4);
-    let view = TestView::devnet();
-    let header = BlockHeader::default();
-    let block = Block::new(header, Vec::new(), BlockSeal::bft(Vec::new()));
-
-    assert_eq!(e.validate_header(&header, &header, &view), Err(ConsensusError::EngineUnavailable));
-    assert_eq!(e.validate_seal(&block, &view), Err(ConsensusError::EngineUnavailable));
-    assert_eq!(e.next_bits(&header, &view), Err(ConsensusError::EngineUnavailable));
-    assert_eq!(
-        e.seal(BlockTemplate::new(header, Vec::new(), 1), &AtomicBool::new(false)),
-        Err(ConsensusError::EngineUnavailable)
-    );
-}
-
-#[test]
-fn finality_follows_the_last_recorded_commit() {
-    let p = params(4);
-    let e = BftEngine::new(p.clone(), None).unwrap();
-    let view = TestView::devnet();
-    assert_eq!(e.finalized_height(&view), None, "nothing is final before the first commit");
-    assert_eq!(e.locked_on(), None);
-    assert_eq!(e.last_commit(), None);
-
-    let hash = BlockHash::from_bytes([0x33; 32]);
-    let c = commit_signed_by(&p, &[0, 1, 2], 41, 3, hash);
-    e.record_commit(c.clone());
-    assert_eq!(e.finalized_height(&view), Some(41));
-    assert_eq!(e.locked_on(), Some((3, hash)));
-    assert_eq!(e.last_commit(), Some(c));
-}
-
-#[test]
-fn a_commit_seal_carries_a_verifiable_certificate_end_to_end() {
-    // The full path the chain layer will take: hash a header, build a
-    // commit over it, put it in the seal, read it back, verify it.
-    let p = params(4);
-    let e = BftEngine::new(p.clone(), None).unwrap();
-    let header = BlockHeader { version: 1, timestamp_ms: 5_000, ..BlockHeader::default() };
-    let hash = block_hash(&header);
-    let commit = commit_signed_by(&p, &[1, 2, 3], 99, 0, hash);
-    let block = Block::new(header, Vec::new(), commit.to_seal());
-
-    assert_eq!(block.seal.engine, BlockSeal::ENGINE_BFT);
-    let decoded = BftCommit::decode(&block.seal.data).unwrap();
-    assert_eq!(decoded, commit);
-    assert_eq!(e.verify_commit(&decoded, &block_hash(&block.header), 99), Ok(()));
 }

@@ -59,24 +59,49 @@ git clone https://github.com/rahuldhali/ferrum && cd ferrum
 cargo build --release
 
 # a private chain on your laptop, mining immediately
-./target/release/chaind --network devnet --mine --datadir ./data
+./target/release/chaind --network devnet --mine --index --datadir ./data
 
-# in another shell
+# in another shell — the address is stdout, the mnemonic is stderr
 ./target/release/chain-cli wallet new
 ./target/release/chain-cli chain info
+./target/release/chain-cli faucet request
 ./target/release/chain-cli wallet balance
 ./target/release/chain-cli wallet send --to rfer1... --amount 1.5
 ```
 
+The explorer is on <http://127.0.0.1:8665>, the JSON-RPC on `127.0.0.1:8645`, p2p on
+`0.0.0.0:8655`. Metrics are off unless you ask for `--metrics-listen`.
+
 A four-node local network, including the partition-and-heal demonstration:
 
 ```sh
-bash devnet/up.sh            # 4 nodes, explorer on :8647
+bash devnet/up.sh            # 4 nodes; node i: rpc 8645+i-1, explorer 8665+i-1
 bash devnet/partition.sh     # split the network in two, both halves keep mining
 bash devnet/heal.sh          # reconnect, watch the lower-work branch get reorged away
 ```
 
+On a fast machine those four nodes may not converge, for reasons that are measured and written down
+rather than waved away — see [`docs/RUNNING.md`](docs/RUNNING.md) §2 before you file a bug.
+
 Full operator documentation, including running a public node: [`docs/RUNNING.md`](docs/RUNNING.md).
+How a block actually travels through the code: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+### Genesis
+
+Computed from `ChainParams` on every start, never read from a file. A joining node checks these
+independently; if yours differ you are on a different chain, which is the check working.
+
+| Network | Genesis block hash |
+|---|---|
+| mainnet | `6bfa4fee9e522a6071b5d7d04fc400144d9f519ba95b78d37346f7c597c4436c` |
+| testnet | `9edeafc16709d76a957c0b11587881cb0161dd19069fc25025fbdc4b4ff6e516` |
+| devnet  | `483bb2d9c173599d19dfbb8705c43ebf8ca0d44860889d50867b0c137d59aaf6` |
+
+All three share `timestamp_ms = 1735689600000` (2025-01-01T00:00:00Z), `version = 1` and
+`nonce = 0`; the 50 FRM subsidy is burned to an `OP_RETURN` committing to the network's parameters,
+which is what stops mainnet and testnet — identical in every rule but `chain_id` and address prefix
+— from sharing a genesis hash. The full field-by-field table is in
+[`docs/RUNNING.md`](docs/RUNNING.md) §4.
 
 ---
 
@@ -133,15 +158,24 @@ The full list, including what was deliberately *not* built and why, is in
 
 ## How it is verified
 
-There is no audit. There is this, ranked by how much it actually catches:
+There is no audit. There is this, ranked by how much it actually catches.
+
+`cargo test --workspace --all-targets` runs **2304 tests across 53 test binaries**, all passing.
+`cargo test --workspace --doc` is a separate command and adds **21 documentation tests** (1 ignored)
+— `--all-targets` does not include them, so CI does not run them either; run it by hand before a
+release. Both figures were measured, not estimated, and they move whenever tests are added; the
+commands are the durable part.
+
+The larger blocks, from that run: `ferrum-consensus` 213, `ferrum-node` 199, `ferrum-chain` 186,
+`ferrum-rpc` 181, `ferrum-storage` 177, `ferrum-sim` 135, `ferrum-mempool` 106.
 
 | | |
 |---|---|
 | **Reference executor** | A deliberately naive `apply_block` — `BTreeMap`, no caching — written from [`docs/SPEC.md`](docs/SPEC.md) rather than from the production code, run alongside the real executor on every simulated block. State roots must match. This is the single highest-value test asset in the project. |
 | **Determinism replay harness** | Records `(pre_state, block)` pairs, replays them, and diffs the resulting state-root sequence against a golden file — in debug, in release, and cross-compiled to aarch64. The gate is itself verified: inserting `SystemTime::now()` into the executor must turn CI red. |
 | **Fuzzing** | Two targets, on the two places unauthenticated bytes land: the decoder and the script VM. |
-| **Adversarial scenarios** | Each written red-then-green: timestamp manipulation across a retarget, a 100-block invalid side chain, a double-spend inside one block, output-sum overflow, cross-chain replay, a block engineered to be expensive to validate, a coinbase overpaying by one grain, a duplicate-txid block. |
-| **Multi-node e2e** | Four nodes in CI: partition the network, mine both sides, heal, and require every node to converge on one tip hash. |
+| **Adversarial scenarios** | Ten, each written red-then-green, one file each under `testing/sim/src/scenarios/`: timestamp manipulation across a retarget, a 100-block invalid side chain, a double-spend inside one block, output-sum overflow, cross-chain signature replay, a block engineered to be expensive to validate, a reorg deeper than the mempool's memory, a coinbase overpaying by one grain, a duplicate-txid block (BIP-30), and non-minimal script number encodings. |
+| **Multi-node e2e** | Two of them. `testing/e2e` runs four real `Node`s in one process, over real TCP, real Noise, real gossipsub and real `redb` stores, on every `cargo test`. `devnet/ci-e2e.sh` runs four real `chaind` **processes** in CI — the same properties, but with a real command line and a real `SIGKILL`, which is the part an in-process harness cannot fake. Both partition the network, mine both sides, heal, and require every node to converge on one tip hash. `crates/p2p/tests/two_node.rs` covers the transport on its own. |
 | **Property tests** | Codec round-trip in *both* directions, UTXO apply/rollback as an exact inverse, the interpreter never panicking, the compact-target codec being idempotent. |
 | **Structural invariants** | `scripts/check-invariants.sh` — dependency direction, no unbounded channels, no floats, no wall-clock in the state-transition path, no `mplex`, no `todo!()`. Things no unit test can express. |
 
@@ -169,12 +203,12 @@ crates/
   cli/          chaind and chain-cli
 testing/
   sim/          deterministic simulator, reference executor, adversarial scenarios
-  fuzz/         cargo-fuzz targets
-  e2e/          multi-node integration tests
+  fuzz/         cargo-fuzz targets (a separate crate: nightly + a sanitizer, never in a normal build)
+  e2e/          in-process multi-node harness: real nodes, real TCP, real gossip
   reference/    the independent Python ASERT implementation and its vectors
-explorer/       the static block explorer and faucet
-devnet/         docker-compose, genesis, partition and heal scripts
-docs/           CONTRACT · SPEC · ENCODING · RUNNING · DECISIONS
+explorer/       the static block explorer and faucet page, compiled into chaind
+devnet/         Dockerfile, docker-compose, and the up / status / partition / heal / kill / fork scripts
+docs/           CONTRACT · SPEC · ENCODING · RUNNING · ARCHITECTURE · DECISIONS
 ```
 
 `docs/CONTRACT.md` is normative — exact names, exact signatures, exact algorithms. If an
@@ -203,11 +237,22 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md), then [`docs/CONTRACT.md`](docs/CONTRA
 opening a pull request:
 
 ```sh
+make check      # fmt-check, clippy -D warnings, the whole test suite, then the invariants
+```
+
+or, without `make`:
+
+```sh
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
 bash scripts/check-invariants.sh
 ```
+
+`make help` lists the rest: `make run` for one mining devnet node, `make devnet` for four,
+`make e2e` for the four-process end-to-end test and `make e2e-fast` for its in-process
+equivalent (which `cargo test --workspace` already runs), `make asert` to diff the Rust ASERT
+against the Python reference, `make fuzz` for a 60-second run on each fuzz target.
 
 Security reports: [`SECURITY.md`](SECURITY.md).
 

@@ -168,6 +168,14 @@ impl Node {
 
         // ---- channels ------------------------------------------------------
         let cancel = CancellationToken::new();
+        // Every `?` from here on happens with tasks already running, and those
+        // tasks hold `Arc<Store>` clones — which is to say they hold the `redb`
+        // file lock on the data directory. Without this guard a start that
+        // fails half way (a listen port already in use is the common one)
+        // leaves a blocking thread holding that lock for the life of the
+        // process, and every later attempt to start on the same datadir fails
+        // too: one transient error becomes a permanent one.
+        let mut started = StartGuard::armed(cancel.clone());
         let (events, _) = broadcast::channel::<ChainEvent>(CHAIN_EVENT_CAPACITY);
         let (hints, hint_rx) = mpsc::channel::<PeerId>(SYNC_HINT_CAPACITY);
         let (mined, mined_rx) = mpsc::channel::<Block>(MINED_BLOCK_CAPACITY);
@@ -265,6 +273,7 @@ impl Node {
             None
         };
 
+        started.disarm();
         Ok(Node {
             config,
             store,
@@ -434,6 +443,41 @@ impl Node {
         blocking(move || store.flush()).await??;
         tracing::info!("store flushed; goodbye");
         Ok(())
+    }
+}
+
+/// Cancels a half-started node's tasks when [`Node::start`] fails part way.
+///
+/// Armed for the whole of `start` and disarmed only when a `Node` is about to
+/// be returned, so the failure path — which is every `?` after the first task
+/// is spawned — always cancels. Cancellation is what releases the store: each
+/// task drops its `Arc<Store>` when it notices, and the last one to drop
+/// releases the `redb` file lock.
+struct StartGuard {
+    /// The token every task of the half-built node selects on.
+    cancel: CancellationToken,
+    /// Whether dropping this guard should cancel.
+    armed: bool,
+}
+
+impl StartGuard {
+    /// A guard that will cancel unless it is disarmed.
+    fn armed(cancel: CancellationToken) -> Self {
+        StartGuard { cancel, armed: true }
+    }
+
+    /// The node was built; leave its tasks alone.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            tracing::warn!("node start-up failed; cancelling the tasks it had already started");
+            self.cancel.cancel();
+        }
     }
 }
 

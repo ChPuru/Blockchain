@@ -90,6 +90,10 @@ devnet-down: ## Stop the devnet and delete its data
 e2e: build ## The full end-to-end test CI runs
 	bash devnet/ci-e2e.sh
 
+.PHONY: e2e-fast
+e2e-fast: ## The in-process multi-node e2e suite (also part of `make test`)
+	$(CARGO) test -p ferrum-e2e --all-targets
+
 .PHONY: partition
 partition: ## Split the running devnet in two
 	bash devnet/partition.sh

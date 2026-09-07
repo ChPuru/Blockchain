@@ -732,4 +732,28 @@ mod tests {
         assert_eq!(P2pCommand::Shutdown.kind(), "Shutdown");
         assert_eq!(P2pCommand::CancelResponse { id: RequestId::new(7) }.kind(), "CancelResponse");
     }
+
+    /// Every dial allocates a fresh source port rather than reusing the
+    /// listening one.
+    ///
+    /// libp2p's default is reuse, which is right for a node doing hole
+    /// punching and wrong for this one: two peers that list each other
+    /// statically dial simultaneously, TCP collapses the two reused-port
+    /// sockets into one simultaneous-open connection, and the Noise handshake
+    /// fails because both ends think they are the initiator. On Windows the
+    /// second bind is refused outright. Neither failure is visible in a unit
+    /// test of anything else, so the policy is pinned here.
+    ///
+    /// `DialOpts` exposes `port_use` only to `libp2p-swarm`, so the assertion
+    /// reads the derived `Debug`. That is the whole reason the field is worth
+    /// pinning rather than trusting: it is invisible from the outside.
+    #[test]
+    fn a_dial_never_reuses_the_listening_port() {
+        let addr: Multiaddr = "/ip4/127.0.0.1/tcp/8655".parse().expect("multiaddr");
+        let rendered = format!("{:?}", super::worker::dial_opts(addr));
+        assert!(
+            rendered.contains("port_use: New"),
+            "a dial must allocate a new source port, got: {rendered}"
+        );
+    }
 }

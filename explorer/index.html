@@ -275,13 +275,26 @@ async function viewHome() {
     document.title = `Ferrum Explorer — height ${s.height}`;
 
     const stats = el("dl", { class: "stats" },
-      [["Height", String(s.height)],
-       ["Difficulty", s.difficulty ?? "—"],
-       ["Engine", (s.engine ?? "pow").toUpperCase()],
-       ["Mempool", `${s.mempool_size ?? 0} tx`],
-       ["UTXOs", String(s.utxo_count ?? 0)],
-       ["Peers", String(s.peers ?? 0)]].map(([k, v]) =>
-        el("div", { class: "stat" }, el("dt", {}, k), el("dd", { title: v }, v))));
+      [["Height", String(s.height), null],
+       ["Tip", short(s.best_hash, 8), s.best_hash],
+       ["Difficulty", s.difficulty ?? "—", null],
+       ["Engine", (s.engine ?? "pow").toUpperCase(), null],
+       ["Mempool", `${s.mempool_size ?? 0} tx`, null],
+       ["UTXOs", String(s.utxo_count ?? 0), null],
+       ["Peers", String(s.peers ?? 0), null]].map(([k, v, full]) =>
+        el("div", { class: "stat" }, el("dt", {}, k), el("dd", { title: full ?? v }, v))));
+
+    // `index_enabled` is false on a node started without `--index`. Such a node
+    // is fully valid; it simply has no reverse index, so /api/tx and
+    // /api/address answer with an error rather than data. Saying so here turns
+    // an unexplained failure two clicks away into a known limitation.
+    const indexNotice = s.index_enabled === false
+      ? el("div", { class: "err" },
+          el("strong", {}, "Transaction index disabled. "),
+          el("span", { class: "muted" },
+            "This node was started without --index, so transaction and address pages are "
+            + "unavailable. Blocks and the chain overview are unaffected."))
+      : null;
 
     const blocks = (s.recent_blocks ?? []).map((b) =>
       el("tr", {},
@@ -304,6 +317,7 @@ async function viewHome() {
       : "no finality under proof of work — nothing is ever final";
 
     render(
+      indexNotice,
       stats,
       panel("Recent blocks", finality,
         table(["Height", "Hash", { label: "Txs", num: true }, { label: "Bytes", num: true }, "Age"],
@@ -356,13 +370,16 @@ async function viewBlock(id) {
       " · ",
       b.next_hash ? linkBlock(b.height + 1, "next →") : el("span", { class: "muted" }, "next →"));
 
-    const txs = (b.txs ?? []).map((t, i) =>
+    // `coinbase` comes from the API per transaction. Trusting it rather than
+    // "index 0" means the pill follows the data even if a future response ever
+    // orders transactions differently.
+    const txs = (b.txs ?? []).map((t) =>
       el("tr", {},
         el("td", {}, linkTx(t.txid)),
-        el("td", {}, i === 0 ? el("span", { class: "pill pow" }, "coinbase") : `${t.vin ?? 0} in`),
+        el("td", {}, t.coinbase ? el("span", { class: "pill pow" }, "coinbase") : `${t.vin ?? 0} in`),
         el("td", { class: "num" }, String(t.vout ?? 0)),
         el("td", { class: "num" }, frm(t.value)),
-        el("td", { class: "num" }, i === 0 ? "—" : frm(t.fee))));
+        el("td", { class: "num" }, t.coinbase ? "—" : frm(t.fee))));
 
     render(
       panel(`Block ${b.height}`, nav, kv([
@@ -399,8 +416,8 @@ async function viewTx(txid) {
            el("span", { class: "amt" }, frm(i.value)), " ",
            i.address ? linkAddr(i.address) : el("span", { class: "muted" }, "—")])));
 
-    const outputs = el("ul", {}, (t.outputs ?? []).map((o, n) =>
-      el("li", {}, `${n}. `,
+    const outputs = el("ul", {}, (t.outputs ?? []).map((o, i) =>
+      el("li", {}, `${o.n ?? i}. `,
         o.address ? linkAddr(o.address) : el("span", { class: "muted" }, o.script_type ?? "non-standard"),
         " ", el("span", { class: "amt" }, frm(o.value)),
         o.spent_by ? [" ", linkTx(o.spent_by, "(spent)")]
@@ -414,6 +431,9 @@ async function viewTx(txid) {
             ? el("span", { class: "pill ok" }, "confirmed")
             : el("span", { class: "pill warn" }, "pending")],
           ["Block", t.block_hash ? linkBlock(t.height, `#${t.height} · ${short(t.block_hash)}`) : null],
+          ["Confirmed", t.timestamp_ms != null
+            ? `${stamp(t.timestamp_ms)} (${ago(t.timestamp_ms)})`
+            : null],
           ["Version", String(t.version)],
           ["Lock time", t.lock_time
             ? `${t.lock_time} (${t.lock_time < 500000000 ? "block height" : "unix seconds"})`
@@ -454,7 +474,19 @@ async function viewAddress(addr) {
        ["Transactions", String(a.tx_count ?? 0)]].map(([k, v]) =>
         el("div", { class: "stat" }, el("dt", {}, k), el("dd", { title: v }, v))));
 
+    // `complete: false` means the scan limit cut the walk short, so every
+    // figure above is a lower bound. Presenting a partial balance as "the
+    // balance" would be a quiet lie, which is worse than an ugly banner.
+    const partial = a.complete === false
+      ? el("div", { class: "err" },
+          el("strong", {}, "Partial history. "),
+          el("span", { class: "muted" },
+            "This address has more history than one scan returns, so the balances below are "
+            + "lower bounds, not the balance."))
+      : null;
+
     render(
+      partial,
       panel("Address", null, kv([
         ["Address", el("span", { class: "hash" }, a.address)],
         ["Type", a.script_type ?? "—"],
@@ -466,7 +498,13 @@ async function viewAddress(addr) {
             "consensus rule, not a wallet policy: spending a coinbase immediately would lose the coins " +
             "on any reorg deeper than the spend.")
         : null,
-      panel("History", `${a.tx_count ?? 0} transactions`,
+      // `transactions` is capped server-side; `tx_count` is not. Saying
+      // "showing 1,000 of 1,266" is the difference between a truncated list and
+      // a wrong one.
+      panel("History",
+        rows.length < (a.tx_count ?? 0)
+          ? `showing ${rows.length} of ${a.tx_count} transactions, newest first`
+          : `${a.tx_count ?? 0} transactions`,
         table(["Transaction", "Block", { label: "Change", num: true }, "Age"],
               rows, "No transactions for this address.")));
   } catch (e) { failure(e, `address ${esc(short(addr, 10))}`); }

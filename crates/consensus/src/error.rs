@@ -143,11 +143,37 @@ pub enum ConsensusError {
     #[error("arithmetic overflow while computing {0}")]
     Arithmetic(&'static str),
 
-    /// The BFT round machine is not present in this build. Every
-    /// [`BftEngine`](crate::BftEngine) method that needs it reports this rather
-    /// than pretending to have reached agreement.
-    #[error("the BFT round machine is not available in this build")]
+    /// A BFT engine was asked for something only a configured validator can
+    /// do — signing a vote without a validator key, or forcing `--consensus
+    /// bft` on a node that has no BFT engine.
+    ///
+    /// It is never returned in place of a consensus decision: an engine that
+    /// said "valid" without a quorum would be the exact bug the whole design
+    /// exists to prevent.
+    #[error("this node has no usable BFT engine or validator key")]
     EngineUnavailable,
+
+    /// A BFT header carried a non-zero nonce.
+    ///
+    /// Nothing grinds a nonce under BFT — the quorum in the seal is the proof,
+    /// not the header hash — so a free 64-bit field would let a proposer offer
+    /// the same block content under many different block hashes.
+    #[error("a BFT header must carry nonce 0, found {0}")]
+    NonZeroBftNonce(u64),
+
+    /// A reorg would unwind a block below the engine's finalized height.
+    ///
+    /// Under BFT a committed block is final by construction: it carries `2f+1`
+    /// signatures, and by quorum intersection no conflicting block can ever
+    /// gather the same. Refusing the reorg is how that guarantee reaches the
+    /// chain layer.
+    #[error("reorg to height {fork_height} crosses the finalized height {finalized_height}")]
+    ReorgBelowFinalized {
+        /// Height of the common ancestor the reorg would rewind to.
+        fork_height: u64,
+        /// The last height that can never be rewound.
+        finalized_height: u64,
+    },
 
     /// A BFT validator set smaller than four cannot tolerate a single fault.
     #[error("BFT needs at least {minimum} validators, got {actual}")]

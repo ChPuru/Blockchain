@@ -300,6 +300,45 @@ impl EngineRouter {
     pub fn forced(&self) -> Option<u8> {
         self.forced
     }
+
+    /// The height below which reorgs are impossible, according to the engine
+    /// active at the current tip.
+    ///
+    /// `None` under proof of work: nothing is ever final there, and a
+    /// sufficiently long chain can rewrite any depth.
+    pub fn finalized_height(&self, view: &dyn HeaderView) -> Option<u64> {
+        let (_, tip_height) = view.tip();
+        self.engine_for_height(tip_height).finalized_height(view)
+    }
+
+    /// Refuse a reorg whose common ancestor lies below the finalized height.
+    ///
+    /// This is the other half of the BFT promise. A committed block carries
+    /// `2f+1` signatures, and by quorum intersection no conflicting block at
+    /// that height can ever gather `2f+1` of its own — so a chain that claims
+    /// to replace it is either lying or is proof that more than `f` validators
+    /// are Byzantine. Either way the correct answer is to refuse, loudly, and
+    /// let an operator look; silently rewinding a final block is how a BFT
+    /// chain forks.
+    ///
+    /// # Errors
+    ///
+    /// [`ConsensusError::ReorgBelowFinalized`].
+    pub fn check_reorg(
+        &self,
+        fork_height: u64,
+        view: &dyn HeaderView,
+    ) -> Result<(), ConsensusError> {
+        match self.finalized_height(view) {
+            Some(finalized) if fork_height < finalized => {
+                Err(ConsensusError::ReorgBelowFinalized {
+                    fork_height,
+                    finalized_height: finalized,
+                })
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]
