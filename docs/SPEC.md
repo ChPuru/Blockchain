@@ -242,8 +242,17 @@ after a manipulated timestamp instead of amplifying it.
 
 ### 6.2 The algorithm
 
-Anchor: the block at height 1, with its `bits` and `timestamp_ms`. Below height 1, the target is
-`params.genesis_bits`.
+**Anchor: genesis.** `anchor_height = 0`, `anchor_target` from `params.genesis_bits`,
+`anchor_time_s` from `params.genesis_timestamp_ms`. Every one of those comes from `ChainParams`, so
+the anchor is identical on every node by construction and difficulty depends only on the parent's
+height and timestamp.
+
+The anchor must **not** be read from the chain. An anchor resolved through
+`HeaderView::header_at_height` — which returns the *active* chain — makes the difficulty rule
+fork-dependent: two nodes holding different blocks at the anchor height compute different required
+`bits` for each other's headers, reject them, and fork permanently with no reorg path out, because a
+header that fails validation never reaches fork choice. This is why Bitcoin Cash's `aserti3-2d` pins
+a fixed anchor.
 
 ```
 time_diff   = parent_time_s   - anchor_time_s                     // i64, seconds

@@ -501,16 +501,29 @@ tiebreak applied before the hash rule and is *not* consensus.
 
 ### 6.3 ASERT (`aserti3-2d`) — integer only, exactly this algorithm
 
-Anchor: the block at height `ANCHOR_HEIGHT = 1` (the first block after genesis) with its own
-`bits` and `timestamp_ms`. For the first `ANCHOR_HEIGHT` blocks, `next_bits = genesis_bits`.
+**Anchor: genesis.** `anchor_height = 0`, `anchor_target = compact_to_target(params.genesis_bits)`,
+`anchor_time_s = params.genesis_timestamp_ms / 1000`. All three come from `ChainParams`, so every
+node on the network has byte-identical anchor values by construction, and difficulty is a pure
+function of `(parent_height, parent_time, params)` alone.
+
+> **This was originally specified as "the block at height 1 on the active chain", and that was
+> wrong.** `HeaderView::header_at_height` is defined as *the active chain* (§6.4), so two nodes that
+> sealed different height-1 blocks would compute different required `bits` for each other's headers,
+> reject them as `BadDifficultyTransition`, and ban each other — a **permanent, unrecoverable fork**
+> with no reorg path out, because fork choice never gets to run on a header that fails validation.
+>
+> The failure is easy to reach on a network whose first blocks are cheap, but it is not a devnet
+> artefact: any two nodes that disagree about the anchor disagree about difficulty forever. Bitcoin
+> Cash's `aserti3-2d` uses a fixed anchor for exactly this reason. Anchoring on genesis removes the
+> fork-dependence entirely rather than making it rarer.
 
 ```text
 Given: anchor_target, anchor_time_s, anchor_height,
        parent_time_s (the timestamp of the parent of the block being created),
        parent_height, target_spacing_s, halflife_s.
 
-time_diff   : i64 = parent_time_s - anchor_time_s
-height_diff : i64 = parent_height - anchor_height
+time_diff   : i64 = parent_time_s - anchor_time_s        // anchor = genesis
+height_diff : i64 = parent_height - anchor_height       // anchor_height = 0
 exponent    : i64 = ((time_diff - target_spacing_s * (height_diff + 1)) * 65536) / halflife_s
                     // truncating division toward zero, then corrected below
 
