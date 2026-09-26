@@ -1,0 +1,40 @@
+$ chaind --network devnet --mine --index --datadir ./node/data     # debug build, 2026-09-26, Windows 11 laptop
+INFO ferrum_chain::manager: genesis initialised hash=7747ccde4c1bae8d7f91913e9bcf2f5288c19a54ba0444ed7d21c49f9715008f network=devnet
+INFO ferrum_rpc::server: json-rpc listening addr=127.0.0.1:8645 websocket=true
+INFO ferrum_rpc::server: explorer listening addr=127.0.0.1:8665
+INFO ferrum_node::miner: miner started address=rfer1qz2zuv5qaxj8edhjwz0ht42nrzlh0p3y254tdmg5 explicit=false
+INFO ferrum_node::miner: mined a block hash=000000c746caa5731279bf70b23afa9206106a2c2fedcbd9e984e697408c2341 verdict="accept"
+
+# in a second shell
+$ chain-cli wallet new
+wallet    .../node/wallet\wallet.json
+network   devnet
+rfer1qp8lkdr9pmle68ayt7emadc50akprv8esumvy9x8
+
+$ chain-cli faucet request                  # once coinbase outputs have matured (10 blocks on devnet)
+address           rfer1qp8lkdr9pmle68ayt7emadc50akprv8esumvy9x8
+amount            1.00000000 FRM
+b563eb4f816b7d43ee36aa1937f76115fa4124cc7e354839bbccd7767d3081e5
+
+$ chain-cli wallet send --to rfer1qz2zuv5qaxj8edhjwz0ht42nrzlh0p3y254tdmg5 --amount 0.25
+fee               0.00000234 FRM
+size              234
+9dbae123fb5ad4544be60f9758c9234f8a04a77431ec117e2db77d47c8b01cce
+
+$ chain-cli chain info                     # the payment is waiting in the mempool
+chain             devnet
+height            21
+engine            pow
+difficulty        1.000
+total work        0000000000000000000000000000000000000000000000000000000016030dba
+finalized         none (pow)
+mempool           1
+utxos             23
+index             true
+00000051f198f4529aab3410e7184d1385fc2972643f212a691d00c14194d0b3
+
+$ chain-cli wallet balance                  # after the next block
+immature          0.00000000 FRM
+pending           0.00000000 FRM
+height            23
+0.74999766

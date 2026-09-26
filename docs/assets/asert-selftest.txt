@@ -1,0 +1,2 @@
+$ python testing/reference/asert.py --selftest     # 2026-09-26, Windows 11 laptop
+asert.py selftest: 8360 checks passed

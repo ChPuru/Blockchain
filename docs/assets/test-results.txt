@@ -1,0 +1,64 @@
+$ cargo test --workspace --all-targets --no-run   # then each test binary run from its crate dir
+# 2026-09-26, Windows 11 laptop, debug profile, rustc 1.95.0; per-binary cap 540 s
+# crate           kind  binary                 exit    time   result
+crates/rpc         lib   ferrum_rpc             rc=-1   547.8s  no summary
+crates/p2p         test  two_node               rc=0      5.9s  ok 10p 0f 0i
+crates/p2p         test  service_lifecycle      rc=0      4.0s  ok 8p 0f 0i
+crates/p2p         lib   ferrum_p2p             rc=0      6.2s  ok 95p 0f 0i
+testing/sim        lib   ferrum_sim             rc=101   35.0s  FAILED 137p 1f 0i
+crates/mempool     lib   ferrum_mempool         rc=0      5.1s  ok 111p 0f 0i
+crates/chain       lib   ferrum_chain           rc=0      4.6s  ok 223p 0f 0i
+crates/wallet      test  wallet_e2e             rc=0      2.6s  ok 12p 0f 0i
+crates/wallet      test  wallet_api             rc=0      3.2s  ok 31p 0f 0i
+testing/sim        test  differential           rc=0      3.7s  ok 7p 0f 0i
+testing/sim        test  gate_check             rc=0     21.9s  ok 19p 0f 0i
+testing/sim        test  determinism            rc=101   39.3s  FAILED 5p 3f 0i
+crates/wallet      test  coin_selection         rc=0      1.0s  ok 18p 0f 0i
+crates/consensus   test  asert_vectors          rc=0      1.5s  ok 8p 0f 0i
+crates/wallet      test  selection_properties   rc=0    102.3s  ok 9p 0f 0i
+crates/wallet      test  keystore_file          rc=0      0.6s  ok 27p 0f 0i
+crates/script      test  templates_e2e          rc=0      0.5s  ok 32p 0f 0i
+crates/script      test  golden                 rc=0      0.6s  ok 8p 0f 0i
+crates/script      test  timelocks              rc=0      0.5s  ok 32p 0f 0i
+crates/script      test  verify_rules           rc=0      0.6s  ok 19p 0f 0i
+crates/consensus   lib   ferrum_consensus       rc=0     78.6s  ok 233p 0f 0i
+crates/script      test  never_panics           rc=0      2.3s  ok 5p 0f 0i
+crates/storage     lib   ferrum_storage         rc=0     35.8s  ok 185p 0f 0i
+crates/script      test  opcodes                rc=0      0.5s  ok 27p 0f 0i
+crates/script      test  limits                 rc=0      0.4s  ok 25p 0f 0i
+crates/script      test  conditionals           rc=0      0.6s  ok 15p 0f 0i
+crates/wallet      lib   ferrum_wallet          rc=0      0.8s  ok 85p 0f 0i
+crates/script      test  disassembly            rc=0      0.4s  ok 12p 0f 0i
+crates/crypto      test  bip32                  rc=0      0.5s  ok 13p 0f 0i
+crates/types       lib   ferrum_types           rc=0      1.6s  ok 134p 0f 0i
+crates/script      lib   ferrum_script          rc=0      0.7s  ok 83p 0f 0i
+crates/crypto      test  address                rc=0      0.9s  ok 16p 0f 0i
+crates/crypto      lib   ferrum_crypto          rc=0      1.0s  ok 124p 0f 0i
+crates/crypto      test  merkle                 rc=0      0.9s  ok 19p 0f 0i
+crates/types       test  roundtrip              rc=0      0.8s  ok 19p 0f 0i
+crates/types       test  encoding               rc=0      0.7s  ok 19p 0f 0i
+crates/crypto      test  tags                   rc=0      0.3s  ok 3p 0f 0i
+crates/crypto      test  bip340                 rc=0      0.6s  ok 9p 0f 0i
+crates/crypto      test  bip39                  rc=0      0.8s  ok 11p 0f 0i
+crates/cli         lib   ferrum_cli             rc=0      4.7s  ok 93p 0f 0i
+crates/cli         test  wallet                 rc=0     22.6s  ok 13p 0f 0i
+crates/cli         test  genesis_and_node       rc=0    273.0s  ok 12p 0f 0i
+crates/cli         bin   chaind                 rc=0      0.4s  ok 0p 0f 0i
+crates/cli         test  help                   rc=0      1.0s  ok 8p 0f 0i
+crates/cli         test  script_eval            rc=0      0.9s  ok 12p 0f 0i
+crates/cli         test  wallet_e2e             rc=-1   544.2s  no summary
+crates/cli         bin   chain-cli              rc=0      0.7s  ok 0p 0f 0i
+
+47 binaries:  passed=1986 failed=4 ignored=0  wall=1762s
+
+# ferrum_rpc: no failures. A streamed re-run finished 130 of 189 tests in 420 s, 0 failed; the rest
+#   mine blocks at devnet difficulty in a debug build (getblockchaininfo_reports_the_tip alone: ok, 198.79 s).
+# cli wallet_e2e: its one test (create_mine_send_and_read_the_balance_back_from_the_utxo_set) exceeded 600 s.
+# not compiled within the 10-minute cap on this machine: ferrum-node lib tests, ferrum-e2e, cli node_runtime.
+
+# the four real failures:
+ferrum_sim  scenarios::expensive_block::tests::a_block_over_the_size_limit_is_rejected_before_any_script_runs
+  ExecutorDisagreement { production: "Err(BlockTooLarge { size: 1012259, max: 1000000 })",
+                        reference:  "Err(BlockTooLarge { size: 1012264, max: 1000000 })" }
+determinism (3 tests)  state root at index 0 is genesis e3672a0f…, golden file says genesis 58266ecf…
+  testing/sim/golden/state_roots.json was last regenerated in 3c5f388; genesis.rs / params.rs changed after it (6b20d2f, 377c7a3)

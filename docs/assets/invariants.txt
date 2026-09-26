@@ -1,0 +1,18 @@
+$ bash scripts/check-invariants.sh     # 2026-09-26, Windows 11 laptop (tail of output; exit code 0)
+...
+8. Blocking storage calls on the async runtime
+  ok   no obvious sync storage calls inside async fns
+
+9. Frozen domain tags
+  ok   all ferrum.v1.* domain tags are distinct literals
+
+10. Licence and docs present
+  ok   LICENSE-MIT
+  ok   LICENSE-APACHE
+  ok   README.md
+  ok   docs/CONTRACT.md
+  ok   docs/SPEC.md
+  ok   docs/ENCODING.md
+  ok   docs/RUNNING.md
+
+All structural invariants hold.
