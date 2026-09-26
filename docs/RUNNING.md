@@ -15,7 +15,7 @@ If you only want to see it work, do §1 and stop.
 - Optional: Docker, for the four-node devnet.
 
 ```sh
-git clone https://github.com/rahuldhali/ferrum && cd ferrum
+git clone https://github.com/ChPuru/Blockchain && cd Blockchain
 cargo build --release
 ```
 

@@ -23,8 +23,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/rahuldhali/ferrum"
-authors = ["Rahul Dhali <rahul.dhali@lh2holdings.com>"]
+repository = "https://github.com/ChPuru/Blockchain"
+authors = ["Purunjay Choudhary <puruchoudhary9b@gmail.com>"]
 homepage = "https://ferrum.chain"
 description = "Ferrum - a UTXO blockchain with a stack-based script VM and pluggable PoW/BFT consensus"
 

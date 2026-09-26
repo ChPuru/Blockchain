@@ -50,7 +50,7 @@
 //! positive ones and *valid* at zero. See SPEC §3.3 rule 12 and
 //! `mutate::spend_of_the_blocks_own_coinbase`.
 //!
-//! [`docs/SPEC.md`]: https://github.com/rahuldhali/ferrum/blob/main/docs/SPEC.md
+//! [`docs/SPEC.md`]: https://github.com/ChPuru/Blockchain/blob/main/docs/SPEC.md
 
 use std::collections::{BTreeMap, BTreeSet};
 

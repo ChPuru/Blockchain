@@ -2,7 +2,7 @@
 
 ## Context
 
-`D:\Blockchain_Crypto` is empty. Rahul wants to build a blockchain/cryptocurrency from scratch and
+`D:\Blockchain_Crypto` is empty. Purunjay wants to build a blockchain/cryptocurrency from scratch and
 asked for exhaustive research on how, supplying ~21 build-your-own-blockchain tutorials as reference.
 
 **What this is, in his words:** *"i just want to build this to showoff, even the smallest scale, toy

@@ -5,7 +5,7 @@
 **A UTXO blockchain written from scratch in Rust — stack-based script VM, ASERT difficulty,
 proof-of-work with a live upgrade path to BFT consensus.**
 
-[![CI](https://github.com/rahuldhali/ferrum/actions/workflows/ci.yml/badge.svg)](https://github.com/rahuldhali/ferrum/actions/workflows/ci.yml)
+[![CI](https://github.com/ChPuru/Blockchain/actions/workflows/ci.yml/badge.svg)](https://github.com/ChPuru/Blockchain/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#licence)
 [![Rust](https://img.shields.io/badge/rust-1.95-orange)](rust-toolchain.toml)
 
@@ -55,7 +55,7 @@ proof-of-work for BFT a configuration change instead of a rewrite.
 ## Quick start
 
 ```sh
-git clone https://github.com/rahuldhali/ferrum && cd ferrum
+git clone https://github.com/ChPuru/Blockchain && cd Blockchain
 cargo build --release
 
 # a private chain on your laptop, mining immediately

@@ -114,4 +114,4 @@ Stated because an honest changelog says what the software is not.
 - No replace-by-fee, no segregated witness, no merge-mining, no permissionless peer discovery. Each
   was considered and cut deliberately; see `docs/DECISIONS.md`.
 
-[0.1.0]: https://github.com/rahuldhali/ferrum/releases/tag/v0.1.0
+[0.1.0]: https://github.com/ChPuru/Blockchain/releases/tag/v0.1.0
