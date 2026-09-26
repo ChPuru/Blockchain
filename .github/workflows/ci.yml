@@ -17,7 +17,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95.0
         with: { components: rustfmt }
       - run: cargo fmt --all -- --check
@@ -26,7 +26,7 @@ jobs:
     name: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95.0
         with: { components: clippy }
       - uses: Swatinem/rust-cache@v2
@@ -42,7 +42,7 @@ jobs:
     name: structural invariants
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: bash scripts/check-invariants.sh
 
   test:
@@ -53,7 +53,7 @@ jobs:
       matrix:
         profile: [debug, release]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
@@ -73,7 +73,7 @@ jobs:
     name: determinism on aarch64
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95.0
         with: { targets: aarch64-unknown-linux-gnu }
       - uses: Swatinem/rust-cache@v2
@@ -88,7 +88,7 @@ jobs:
     name: ASERT cross-check against the Python reference
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - uses: dtolnay/rust-toolchain@1.95.0
@@ -102,7 +102,7 @@ jobs:
     name: fuzz smoke (decoder + script VM)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-fuzz --locked
@@ -116,7 +116,7 @@ jobs:
     name: multi-node devnet e2e
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --bin chaind --bin chain-cli
@@ -128,6 +128,6 @@ jobs:
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2
         with: { token: "${{ secrets.GITHUB_TOKEN }}" }
